@@ -8,36 +8,12 @@ p.add_argument('--source',type=Path,default=ROOT/'build/darling-src')
 p.add_argument('--check-only',action='store_true',help='validate against temporary base indexes, without changing existing source')
 a=p.parse_args();source=a.source.resolve();manifest=json.loads((ROOT/'upstream/manifest.json').read_text())
 def run(args,**kwargs):return subprocess.run(args,check=True,**kwargs)
-def applies(repo,patch,reverse=False):
-    return subprocess.run(['git','-C',str(repo),'apply',*(['--reverse'] if reverse else []),'--check','-'],input=patch,text=True,
-                          stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL).returncode==0
-# The rendered text of each patch as last applied, so a later version can revert exactly it.
-applied=ROOT/'build/applied-patches'
-def record_patch(component,patch):
-    applied.mkdir(parents=True,exist_ok=True);(applied/Path(component['patch']).name).write_text(patch)
-def previous_patches(component):
-    """Earlier applied versions of a component's patch: the recorded copy, then each version in this repository's history."""
-    recorded=applied/Path(component['patch']).name
-    if recorded.exists():yield recorded.read_text()
-    history=subprocess.run(['git','-C',str(ROOT),'log','--format=%H','--',component['patch']],text=True,capture_output=True).stdout.split()
-    for commit in history:
-        shown=subprocess.run(['git','-C',str(ROOT),'show',f"{commit}:{component['patch']}"],text=True,capture_output=True)
-        if shown.returncode==0:yield render(shown.stdout)
 if not (source/'.git').exists():
     if a.check_only:p.error('check-only requires an existing pinned source checkout')
     source.parent.mkdir(parents=True,exist_ok=True)
     run(['git','clone',manifest['upstream'],str(source)])
     run(['git','-C',str(source),'checkout','--detach',manifest['revision']])
-    # Recursive initialization can spend a long time fetching nested repos (and
-    # Git LFS assets). Explicit progress keeps the last completed submodule
-    # from looking like the operation that is currently stuck. The pinned
-    # darling-swift .lfsconfig points at the retired git-lfs.darlinghq.org, so
-    # fetch that submodule's LFS objects from GitHub, which still serves them;
-    # otherwise the checkout blocks on the dead host right after sqlite.
-    print('Initializing Darling submodules (large repositories/LFS assets may take a while)...',flush=True)
-    run(['git','-C',str(source),'-c','lfs.url=https://github.com/darlinghq/darling-swift.git/info/lfs',
-         'submodule','update','--init','--recursive','--progress'])
-    print('Darling submodules initialized.',flush=True)
+    run(['git','-C',str(source),'submodule','update','--init','--recursive'])
 # Never reset someone else's checkout to make a patch apply.
 for component in manifest['components']:
     repo=source/component['path']
@@ -50,20 +26,9 @@ for component in manifest['components']:
             run(['git','-C',str(repo),'read-tree',component['revision']],env=env)
             run(['git','-C',str(repo),'apply','--cached','--check','--whitespace=nowarn','-'],input=patch,text=True,env=env)
     else:
-        already=applies(repo,patch,reverse=True)
-        if not already and not applies(repo,patch):
-            # An older version of this patch is applied (the checkout predates a pull). Revert exactly that
-            # version, never a reset, so other edits in the repository survive.
-            old=next((text for text in previous_patches(component) if applies(repo,text,reverse=True)),None)
-            if old is None:raise SystemExit(f"{component['path']}: {component['patch']} neither applies nor matches an earlier applied version; "
-                                             f"the checkout has other edits. Commit or discard them in {repo}, then run this again.")
-            print(f"Replacing the earlier {component['patch']} in {component['path']}",flush=True)
-            run(['git','-C',str(repo),'apply','--reverse','--whitespace=nowarn','-'],input=old,text=True)
-            if not applies(repo,patch):
-                run(['git','-C',str(repo),'apply','--whitespace=nowarn','-'],input=old,text=True)
-                raise SystemExit(f"{component['path']}: the new {component['patch']} does not apply to the pinned revision; the earlier version was restored")
+        already=subprocess.run(['git','-C',str(repo),'apply','--reverse','--check','-'],input=patch,text=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL).returncode==0
         if not already:
+            run(['git','-C',str(repo),'apply','--check','-'],input=patch,text=True)
             run(['git','-C',str(repo),'apply','--whitespace=nowarn','-'],input=patch,text=True)
-        record_patch(component,patch)
     print(('Checked ' if a.check_only else 'Prepared ')+component['path'],flush=True)
 print('All',len(manifest['components']),'component patches validated' if a.check_only else 'component patches ready')

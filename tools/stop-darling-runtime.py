@@ -18,8 +18,7 @@ def live(pid):
     try:
         state = next(line.split()[1] for line in (Path('/proc') / str(pid) / 'status').read_text().splitlines() if line.startswith('State:'))
         return state != 'Z'
-    except (FileNotFoundError, ProcessLookupError, StopIteration):
-        # A process can exit after status is opened but before it is read.
+    except (FileNotFoundError, StopIteration):
         return False
 
 def process_identity(pid):

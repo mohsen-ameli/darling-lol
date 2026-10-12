@@ -20,7 +20,7 @@ index 393a1eb3..6a47ac89 100644
  		xkbfile
  )
 diff --git a/AppKit/MacWorkspace.m b/AppKit/MacWorkspace.m
-index ba52cd3b..d566b946 100644
+index ba52cd3b..ad8ba2a2 100644
 --- a/AppKit/MacWorkspace.m
 +++ b/AppKit/MacWorkspace.m
 @@ -13,6 +13,32 @@
@@ -56,19 +56,6 @@ index ba52cd3b..d566b946 100644
  - (NSImage *) iconForFile: (NSString *) path {
      // TODO: call GetIconRefFromFileInfo()
      NSUnimplementedMethod();
-@@ -95,9 +121,9 @@
- }
- 
- - (BOOL) openURL: (NSURL *) url {
--    // TODO: Call LSOpenFromURLSpec()
--    NSUnimplementedMethod();
--    return NO;
-+    if (url == nil)
-+        return NO;
-+    return LSOpenCFURLRef((CFURLRef) url, NULL) == noErr;
- }
- 
- - (BOOL) selectFile: (NSString *) path
 diff --git a/AppKit/NSAccessibility.m b/AppKit/NSAccessibility.m
 index 39d1b104..3662bc4b 100644
 --- a/AppKit/NSAccessibility.m
@@ -518,17 +505,34 @@ diff --git a/AppKit/NSCursor.m b/AppKit/NSCursor.m
 index 4cd74633..9be5239a 100644
 --- a/AppKit/NSCursor.m
 +++ b/AppKit/NSCursor.m
-@@ -365,12 +365,9 @@ static NSMutableArray *_cursorStack = nil;
+@@ -174,6 +174,7 @@ void NSPlatformSetCursorImp(id object) {
+ @implementation NSCursor
+ 
+ static NSMutableArray *_cursorStack = nil;
++static BOOL hiddenUntilMouseMoves = NO;
+ 
+ + (void) initialize {
+     if (self == [NSCursor class]) {
+@@ -365,12 +366,22 @@ static NSMutableArray *_cursorStack = nil;
  }
  
  + (void) setHiddenUntilMouseMoves: (BOOL) flag {
--    if (flag)
--        [self hide];
--    else
--        [self unhide];
-+    [[NSDisplay currentDisplay] setCursorHiddenUntilMouseMoves: flag];
++    hiddenUntilMouseMoves = flag;
+     if (flag)
+         [self hide];
+     else
+         [self unhide];
  }
  
++/* Backend hook: typing may hide the cursor, but the next real motion
++ * restores it without requiring the application to issue another cursor set. */
+++ (void) _unhideOnMouseMove {
++    if (hiddenUntilMouseMoves) {
++        hiddenUntilMouseMoves = NO;
++        [self unhide];
++    }
++}
++
  - initWithImage: (NSImage *) image
          foregroundColorHint: (NSColor *) foregroundHint
          backgroundColorHint: (NSColor *) backgroundHint
@@ -547,34 +551,7 @@ index cacd8999..13faf0f7 100644
  - (instancetype) init {
      if ([self class] != [NSDisplay class]) {
          // Initializing a concrete subclass.
-@@ -135,6 +139,26 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
- - (void) unhideCursor {
-     NSInvalidAbstractInvocation();
- }
- 
-+- (void) setCursorHiddenUntilMouseMoves: (BOOL) flag {
-+    if (_cursorHiddenUntilMouseMoves == flag)
-+        return;
-+
-+    _cursorHiddenUntilMouseMoves = flag;
-+    if (flag)
-+        [self hideCursor];
-+    else
-+        [self unhideCursor];
-+}
-+
-+// A backend calls this when the pointer genuinely moves; it cancels a
-+// pending -setCursorHiddenUntilMouseMoves:YES, matching AppKit.
-+- (void) pointerMoved {
-+    if (_cursorHiddenUntilMouseMoves) {
-+        _cursorHiddenUntilMouseMoves = NO;
-+        [self unhideCursor];
-+    }
-+}
-+
- // Arrow, IBeam, HorizontalResize, VerticalResize
- - (id) cursorWithName: (NSString *) name {
-@@ -146,28 +170,46 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
+@@ -146,28 +150,46 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
      NSInvalidAbstractInvocation();
  }
  
@@ -1271,42 +1248,10 @@ index 9177a986..9c3c5ca3 100644
  
  @end
 diff --git a/AppKit/NSThemeFrame.m b/AppKit/NSThemeFrame.m
-index 0ec827c0..a24cd9f5 100644
+index 0ec827c0..6f780225 100644
 --- a/AppKit/NSThemeFrame.m
 +++ b/AppKit/NSThemeFrame.m
-@@ -85,7 +85,14 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
- - (void) resizeSubviewsWithOldSize: (NSSize) oldSize {
-     NSView *menuView = nil;
-     NSToolbarView *toolbarView = nil;
--    NSView *contentView = nil;
-+    /* Browser windows can add overlay/titlebar siblings after their content.
-+     * Identify the window's actual content owner rather than choosing the
-+     * last ordinary subview. Full-size content wrappers can own it indirectly. */
-+    NSView *contentView = [[self window] contentView];
-+    while (contentView && [contentView superview] && [contentView superview] != self)
-+        contentView = [contentView superview];
-+    if ([contentView superview] != self)
-+        contentView = nil;
- 
-     // tile the subviews, when/if we add titlebars and such do it here
-     for (NSView *view in _subviews) {
-@@ -93,10 +100,13 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
-             menuView = view;
-         else if ([view isKindOfClass: [NSToolbarView class]])
-             toolbarView = (NSToolbarView *) view;
--        else
--            contentView = view;
-     }
- 
-+    // Other decorations still follow their autoresizing masks.
-+    for (NSView *view in [[_subviews copy] autorelease])
-+        if (view != contentView && view != menuView && view != toolbarView)
-+            [view resizeWithOldSuperviewSize: oldSize];
-+
-     // subtracts menu height but not toolbar height
-     NSRect contentFrame = [[[self window] class]
-             contentRectForFrameRect: [self bounds]
-@@ -133,8 +143,10 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
+@@ -133,8 +133,10 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
  }
  
  - (void) mouseDown: (NSEvent *) event {
@@ -1332,31 +1277,19 @@ index c3f5d056..dbd93174 100644
          @"NSTouchBarItemIdentifierCharacterPicker";
  
 diff --git a/AppKit/NSView.m b/AppKit/NSView.m
-index 8ac2bbdc..08197fbc 100644
+index 8ac2bbdc..7486ebf5 100644
 --- a/AppKit/NSView.m
 +++ b/AppKit/NSView.m
-@@ -46,6 +46,12 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
+@@ -46,6 +46,8 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
  #import <QuartzCore/CALayerContext.h>
  #import <QuartzCore/CATransaction.h>
  #import <AppKit/NSLayoutConstraint.h>
 +#import <AppKit/NSTextInput.h>
 +#import <objc/runtime.h>
-+#include "NSGeometryTrace.h"
-+#include <stdio.h>
-+#include <stdlib.h>
-+#include <unistd.h>
  
  @class IBMetricsTable;
  
-@@ -66,6 +72,7 @@ const NSViewFullScreenModeOptionKey NSFullScreenModeApplicationPresentationOptio
- - (CGAffineTransform) transformToWindow;
- - (CGAffineTransform) transformToLayer;
- - (void) _trackingAreasChanged;
-+- (void) _darlingSetFrame: (NSRect) frame;
- @end
- 
- @implementation NSView
-@@ -955,6 +962,54 @@ static inline void buildTransformsIfNeeded(NSView *self) {
+@@ -955,6 +957,54 @@ static inline void buildTransformsIfNeeded(NSView *self) {
              CGPointApplyAffineTransform(point, toWindow), fromWindow);
  }
  
@@ -1411,77 +1344,7 @@ index 8ac2bbdc..08197fbc 100644
  - (NSSize) convertSize: (NSSize) size fromView: (NSView *) viewOrNil {
      NSView *fromView =
              (viewOrNil != nil) ? viewOrNil : [[self window] _backgroundView];
-@@ -1029,6 +1084,16 @@ static inline void buildTransformsIfNeeded(NSView *self) {
- }
- 
- - (void) setFrame: (NSRect) frame {
-+    /* AppKit dispatches through the component setters. Subclasses use
-+     * setFrameSize: to notify their renderer even when callers set a full
-+     * frame (including autoresizing through resizeWithOldSuperviewSize:). */
-+    if (!NSEqualPoints(_frame.origin, frame.origin))
-+        [self setFrameOrigin: frame.origin];
-+    if (!NSEqualSizes(_frame.size, frame.size))
-+        [self setFrameSize: frame.size];
-+}
-+
-+- (void) _darlingSetFrame: (NSRect) frame {
-     // Cocoa does not post the notification if the frames are equal
-     // Possible that resizeSubviewsWithOldSize is not called if the sizes are
-     // equal
-@@ -1052,6 +1117,12 @@ static inline void buildTransformsIfNeeded(NSView *self) {
-     }
-     _frame = frame;
- 
-+    /* Resize callbacks can convert child frames to window coordinates. They
-+     * must see the new parent transform, and compositor submissions must see
-+     * the new layer bounds even before the next coordinate conversion. */
-+    invalidateTransform(self);
-+    configureLayerGeometry(self);
-+
-     [_window invalidateCursorRectsForView: self]; // this also invalidates
-                                                   // tracking areas
- 
-@@ -1068,6 +1139,14 @@ static inline void buildTransformsIfNeeded(NSView *self) {
- 
-     invalidateTransform(self);
- 
-+    if (getenv("DARLING_UI_GEOMETRY_TRACE") &&
-+        (_frame.size.width >= 256 || _frame.size.height >= 256))
-+        DarlingGeometryTrace("UI_GEOMETRY view pid=%d class=%s parent=%s frame=%.0fx%.0f bounds=%.0fx%.0f mask=%lu autoresizes=%d\n",
-+            getpid(), class_getName([self class]),
-+            _superview ? class_getName([_superview class]) : "none",
-+            _frame.size.width, _frame.size.height, _bounds.size.width, _bounds.size.height,
-+            (unsigned long)_autoresizingMask, _autoresizesSubviews);
-+
-     if (_postsNotificationOnFrameChange)
-         [[NSNotificationCenter defaultCenter]
-                 postNotificationName: NSViewFrameDidChangeNotification
-@@ -1078,14 +1157,14 @@ static inline void buildTransformsIfNeeded(NSView *self) {
-     NSRect frame = _frame;
- 
-     frame.size = size;
--    [self setFrame: frame];
-+    [self _darlingSetFrame: frame];
- }
- 
- - (void) setFrameOrigin: (NSPoint) origin {
-     NSRect frame = [self frame];
- 
-     frame.origin = origin;
--    [self setFrame: frame];
-+    [self _darlingSetFrame: frame];
- }
- 
- - (void) setFrameRotation: (CGFloat) angle {
-@@ -1100,6 +1179,7 @@ static inline void buildTransformsIfNeeded(NSView *self) {
-     if (!NSEqualRects(bounds, _bounds)) {
-         _bounds = bounds;
-         invalidateTransform(self);
-+        configureLayerGeometry(self);
- 
-         [_window invalidateCursorRectsForView: self]; // this also invalidates
-                                                       // tracking areas
-@@ -1254,7 +1334,11 @@ static inline void buildTransformsIfNeeded(NSView *self) {
+@@ -1254,7 +1304,11 @@ static inline void buildTransformsIfNeeded(NSView *self) {
                   (NSComparisonResult (*)(id, id, void *)) compareFunction
                             context: (void *) context
  {
@@ -1494,7 +1357,7 @@ index 8ac2bbdc..08197fbc 100644
  }
  
  - (void) didAddSubview: (NSView *) subview {
-@@ -1511,8 +1595,16 @@ static inline void buildTransformsIfNeeded(NSView *self) {
+@@ -1511,8 +1565,16 @@ static inline void buildTransformsIfNeeded(NSView *self) {
  }
  
  - (NSTextInputContext *) inputContext {
@@ -1513,7 +1376,7 @@ index 8ac2bbdc..08197fbc 100644
  }
  
  - (void) registerForDraggedTypes: (NSArray *) types {
-@@ -1819,15 +1911,21 @@ static inline void buildTransformsIfNeeded(NSView *self) {
+@@ -1819,15 +1881,21 @@ static inline void buildTransformsIfNeeded(NSView *self) {
  
  - (void) _createLayerContextIfNeeded {
      if ([_superview layer] == nil) {
@@ -1537,7 +1400,7 @@ index 8ac2bbdc..08197fbc 100644
      [[_superview layer] addSublayer: _layer];
      [self _createLayerContextIfNeeded];
  }
-@@ -1905,6 +2003,7 @@ static inline void buildTransformsIfNeeded(NSView *self) {
+@@ -1905,6 +1973,7 @@ static inline void buildTransformsIfNeeded(NSView *self) {
              [[_superview layer] replaceSublayer: _layer with: value];
              [_layer release];
              _layer = value;
@@ -1546,15 +1409,14 @@ index 8ac2bbdc..08197fbc 100644
  
          [_subviews
 diff --git a/AppKit/NSWindow.m b/AppKit/NSWindow.m
-index d545120a..b2845478 100644
+index d545120a..9b995b5a 100644
 --- a/AppKit/NSWindow.m
 +++ b/AppKit/NSWindow.m
-@@ -45,6 +45,21 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
+@@ -45,6 +45,20 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
  #import <AppKit/NSWindowAnimationContext.h>
  #import <ApplicationServices/ApplicationServices.h>
  #import <CoreGraphics/CGWindow.h>
 +#import <objc/runtime.h>
-+#include "NSGeometryTrace.h"
 +#include <unistd.h>
 +#include <string.h>
 +
@@ -1571,33 +1433,7 @@ index d545120a..b2845478 100644
  
  const NSNotificationName NSWindowDidBecomeKeyNotification =
          @"NSWindowDidBecomeKeyNotification";
-@@ -204,6 +219,25 @@ NSInteger NSBitsPerPixelFromDepth(NSWindowDepth depth) {
- 
- @end
- 
-+/* darling-lol: whether a mouse-down may move the window must be decided by the frontmost view
-+ * under the pointer by GEOMETRY, not by -hitTest:. Electron implements draggable regions as a
-+ * web view that can move the window plus ControlRegionView overlays (mouseDownCanMoveWindow == NO)
-+ * on top of everything that must not drag; those overlays return nil from -hitTest: so the click
-+ * still reaches the page. Using the hitTest result here always found the web view, so every click
-+ * started a window drag and never reached the page. `point` is in `view`'s own coordinates. */
-+static NSView *DarlingFrontmostViewAtPoint(NSView *view, NSPoint point) {
-+    if (view == nil || [view isHidden] || !NSPointInRect(point, [view bounds]))
-+        return nil;
-+    NSArray *subviews = [view subviews];
-+    for (NSInteger i = (NSInteger)[subviews count] - 1; i >= 0; i--) {
-+        NSView *subview = [subviews objectAtIndex: i];
-+        NSView *found = DarlingFrontmostViewAtPoint(subview, [subview convertPoint: point fromView: view]);
-+        if (found != nil)
-+            return found;
-+    }
-+    return view;
-+}
-+
- @implementation NSWindow
- 
- @synthesize identifier = _identifier;
-@@ -218,7 +252,8 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -218,7 +232,8 @@ static BOOL _allowsAutomaticWindowTabbing;
  /* This method is Cococtron specific and can be override by subclasses, do not
   * change method name */
  + (BOOL) hasMainMenuForStyleMask: (NSWindowStyleMask) styleMask {
@@ -1607,7 +1443,7 @@ index d545120a..b2845478 100644
  }
  
  /* This method is Cococtron specific and can be override by subclasses, do not
-@@ -318,6 +353,7 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -318,6 +333,7 @@ static BOOL _allowsAutomaticWindowTabbing;
          [NSApplication sharedApplication];
      }
      _styleMask = styleMask;
@@ -1615,7 +1451,7 @@ index d545120a..b2845478 100644
      _backingType = backing;
      _isDeferred = defer;
  
-@@ -351,7 +387,7 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -351,7 +367,7 @@ static BOOL _allowsAutomaticWindowTabbing;
      [_backgroundView _setWindow: self];
      [_backgroundView setNextResponder: self];
  
@@ -1624,7 +1460,7 @@ index d545120a..b2845478 100644
      _contentView = [[NSView alloc] initWithFrame: contentViewFrame];
      [_contentView setAutoresizesSubviews: YES];
      [_contentView
-@@ -399,6 +435,8 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -399,6 +415,8 @@ static BOOL _allowsAutomaticWindowTabbing;
  }
  
  - (void) dealloc {
@@ -1633,51 +1469,7 @@ index d545120a..b2845478 100644
      [[NSNotificationCenter defaultCenter] removeObserver: self];
      [_childWindows release];
      [_title release];
-@@ -934,6 +972,22 @@ static BOOL _allowsAutomaticWindowTabbing;
-     return _animationContext;
- }
- 
-+/* Dump geometry only, including children which did not receive a resize.
-+ * The node/depth bounds keep malformed or unexpectedly large trees bounded. */
-+static void traceGeometryTree(NSView *view, unsigned depth, unsigned *remaining) {
-+    if (!view || depth > 12 || !*remaining)
-+        return;
-+    --*remaining;
-+    NSRect frame = [view frame], bounds = [view bounds];
-+    DarlingGeometryTrace("UI_GEOMETRY tree pid=%d depth=%u view=%p class=%s parent=%p frame=%.0f,%.0f,%.0fx%.0f bounds=%.0f,%.0f,%.0fx%.0f mask=%lu autoresizes=%d layer=%d\n",
-+        getpid(), depth, view, class_getName([view class]), [view superview],
-+        frame.origin.x, frame.origin.y, frame.size.width, frame.size.height,
-+        bounds.origin.x, bounds.origin.y, bounds.size.width, bounds.size.height,
-+        (unsigned long)[view autoresizingMask], [view autoresizesSubviews], [view wantsLayer]);
-+    for (NSView *child in [view subviews])
-+        traceGeometryTree(child, depth + 1, remaining);
-+}
-+
- - (void) setFrame: (NSRect) newFrame
-           display: (BOOL) display
-           animate: (BOOL) animate
-@@ -944,8 +998,19 @@ static BOOL _allowsAutomaticWindowTabbing;
-     _frame = newFrame;
-     _makeSureIsOnAScreen = YES;
- 
--    [_backgroundView setFrameSize: _frame.size];
-+    /* Native child windows convert their Y origin using the platform
-+     * window's height. Update it before laying out/resizing those children. */
-     [_platformWindow setFrame: _frame];
-+    [_backgroundView setFrameSize: _frame.size];
-+
-+    if (didSize && getenv("DARLING_UI_GEOMETRY_TRACE")) {
-+        NSSize contentSize = [_contentView frame].size;
-+        DarlingGeometryTrace("UI_GEOMETRY window pid=%d class=%s frame=%.0fx%.0f content=%.0fx%.0f style=%lu window=%p contentView=%p\n",
-+            getpid(), class_getName([self class]), _frame.size.width, _frame.size.height,
-+            contentSize.width, contentSize.height, (unsigned long)_styleMask, self, [self contentView]);
-+        unsigned remaining = 128;
-+        traceGeometryTree(_backgroundView, 0, &remaining);
-+    }
- 
-     if (didSize) {
-         [self resetCursorRects];
-@@ -1025,7 +1090,34 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -1025,7 +1043,34 @@ static BOOL _allowsAutomaticWindowTabbing;
  }
  
  - (void) setMovable: (BOOL) movable {
@@ -1713,7 +1505,7 @@ index d545120a..b2845478 100644
  }
  
  - (void) setBackingType: (NSBackingStoreType) value {
-@@ -1234,6 +1326,7 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -1234,6 +1279,7 @@ static BOOL _allowsAutomaticWindowTabbing;
  
  - (void) setIgnoresMouseEvents: (BOOL) value {
      _ignoresMouseEvents = value;
@@ -1721,7 +1513,7 @@ index d545120a..b2845478 100644
  }
  
  - (void) setAspectRatio: (NSSize) value {
-@@ -1413,8 +1506,14 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -1413,8 +1459,14 @@ static BOOL _allowsAutomaticWindowTabbing;
  }
  
  - (NSButton *) standardWindowButton: (NSWindowButton) value {
@@ -1738,7 +1530,7 @@ index d545120a..b2845478 100644
  }
  
  - (NSButtonCell *) defaultButtonCell {
-@@ -1425,6 +1524,17 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -1425,6 +1477,17 @@ static BOOL _allowsAutomaticWindowTabbing;
      return [_sheetContext sheet];
  }
  
@@ -1756,7 +1548,7 @@ index d545120a..b2845478 100644
  - (id) windowController {
      return _windowController;
  }
-@@ -1511,10 +1621,7 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -1511,10 +1574,7 @@ static BOOL _allowsAutomaticWindowTabbing;
      return [_platformWindow isMiniaturized];
  }
  
@@ -1768,7 +1560,7 @@ index d545120a..b2845478 100644
  
  - (BOOL) inLiveResize {
      return _isInLiveResize;
-@@ -1561,6 +1668,117 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -1561,6 +1621,108 @@ static BOOL _allowsAutomaticWindowTabbing;
      return point;
  }
  
@@ -1813,18 +1605,9 @@ index d545120a..b2845478 100644
 +    return _isMovableByWindowBackground;
 +}
 +
-+/* darling-lol M57: NSWindowOcclusionStateVisible == 1 << 1.
-+ *
-+ * Apple's contract is a bitmask: an on-screen window's state *includes* the
-+ * Visible bit, tested with &. Electron 22.3.27's NativeWindowMac::IsVisible()
-+ * instead compares for exact equality, so an Apple-correct value makes every
-+ * ordered-in window look occluded and the client's visible checks fail. Also
-+ * report the reserved 1 << 2 bit: &-based readers (Electron's own
-+ * windowDidChangeOcclusionState:, Chromium) still see the Visible bit set,
-+ * while the exact == test is false and unpatched Electron resolves IsVisible()
-+ * correctly without a Riot binary patch. */
++/* darling-lol M57: NSWindowOcclusionStateVisible == 1 << 1. */
 +- (NSUInteger) occlusionState {
-+    return _isVisible ? (NSUInteger)((1 << 1) | (1 << 2)) : (NSUInteger)0;
++    return _isVisible ? (NSUInteger)(1 << 1) : (NSUInteger)0;
 +}
 +
 +- (BOOL) isRestorable {
@@ -1886,7 +1669,7 @@ index d545120a..b2845478 100644
  - (NSRect) frameRectForContentRect: (NSRect) contentRect {
      // hasMainMenu is an instance method so we can't just use the class method
      //  frameRectForContentRect:styleMask:
-@@ -1580,6 +1798,10 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -1580,6 +1742,10 @@ static BOOL _allowsAutomaticWindowTabbing;
  }
  
  - (NSRect) contentRectForFrameRect: (NSRect) frameRect {
@@ -1897,7 +1680,7 @@ index d545120a..b2845478 100644
      NSRect result = [[NSDisplay currentDisplay] insetRect: frameRect
                             forNativeWindowBorderWithStyle: [self styleMask]];
  
-@@ -2155,6 +2377,7 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -2155,6 +2321,7 @@ static BOOL _allowsAutomaticWindowTabbing;
  - (void) orderWindow: (NSWindowOrderingMode) place
            relativeTo: (NSInteger) relativeTo
  {
@@ -1905,7 +1688,7 @@ index d545120a..b2845478 100644
      // The move notifications are sent under unknown conditions around
      // orderFront: in the Apple AppKit, we do them all the time here until it's
      // figured out. I suspect it is a side effect of off-screen windows being at
-@@ -2208,6 +2431,8 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -2208,6 +2375,8 @@ static BOOL _allowsAutomaticWindowTabbing;
          break;
      }
  
@@ -1914,7 +1697,7 @@ index d545120a..b2845478 100644
      [self postNotificationName: NSWindowDidMoveNotification];
  }
  
-@@ -2257,6 +2482,12 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -2257,6 +2426,12 @@ static BOOL _allowsAutomaticWindowTabbing;
  }
  
  - (void) sendEvent: (NSEvent *) event {
@@ -1927,7 +1710,7 @@ index d545120a..b2845478 100644
      // Some events can cause our window to be destroyed
      // So make sure self lives at least through this current run loop...
      [[self retain] autorelease];
-@@ -2300,6 +2531,10 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -2300,6 +2475,10 @@ static BOOL _allowsAutomaticWindowTabbing;
  
      case NSLeftMouseDown: {
          NSView *view = [_backgroundView hitTest: [event locationInWindow]];
@@ -1938,7 +1721,7 @@ index d545120a..b2845478 100644
  
          if ([view acceptsFirstResponder]) {
              if ([view needsPanelToBecomeKey]) {
-@@ -2307,6 +2542,27 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -2307,6 +2486,14 @@ static BOOL _allowsAutomaticWindowTabbing;
              }
          }
  
@@ -1946,27 +1729,14 @@ index d545120a..b2845478 100644
 +        // drag. Only windows opting into background dragging intercept it;
 +        // CEF otherwise handles clicks and invokes performWindowDragWithEvent:
 +        // itself for its native titlebar regions.
-+        if (_isMovable && _isMovableByWindowBackground) {
-+            NSView *dragView = DarlingFrontmostViewAtPoint(_backgroundView,
-+                [_backgroundView convertPoint: [event locationInWindow] fromView: nil]);
-+            if (dragView == nil)
-+                dragView = view;
-+            if (inputTrace) {
-+                static int dragTrace = -1;
-+                if (dragTrace < 0) dragTrace = getenv("RCLOL_INPUT_TRACE") != NULL;
-+                if (dragTrace)
-+                    NSLog(@"LOLDRAG hit=%s dragView=%s canMove=%d", class_getName([view class]),
-+                          class_getName([dragView class]), (int)[dragView mouseDownCanMoveWindow]);
-+            }
-+            if ([dragView mouseDownCanMoveWindow]) {
-+                [self performWindowDragWithEvent:event];
-+                break;
-+            }
++        if (_isMovable && _isMovableByWindowBackground && [view mouseDownCanMoveWindow]) {
++            [self performWindowDragWithEvent:event];
++            break;
 +        }
          // Event goes to view, not first responder.
          [view mouseDown: event];
          _mouseDownLocationInWindow = [event locationInWindow];
-@@ -2330,6 +2586,31 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -2330,6 +2517,31 @@ static BOOL _allowsAutomaticWindowTabbing;
          _mouseDownLocationInWindow = NSMakePoint(NAN, NAN);
          break;
  
@@ -1998,7 +1768,7 @@ index d545120a..b2845478 100644
      case NSMouseMoved: {
          NSView *hit = [_backgroundView hitTest: [event locationInWindow]];
  
-@@ -2536,6 +2817,7 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -2536,6 +2748,7 @@ static BOOL _allowsAutomaticWindowTabbing;
      } else {
          [[self platformWindow] hideWindow];
      }
@@ -2006,21 +1776,7 @@ index d545120a..b2845478 100644
  }
  
  - (void) orderFront: (id) sender {
-@@ -3064,6 +3346,13 @@ static BOOL _allowsAutomaticWindowTabbing;
-     if (didSize) {
-         // Don't redraw everything unless we really have to.
-         [_backgroundView setFrameSize: _frame.size];
-+        if (getenv("DARLING_UI_GEOMETRY_TRACE")) {
-+            DarlingGeometryTrace("UI_GEOMETRY native_window pid=%d window=%p contentView=%p frame=%.0fx%.0f\n",
-+                                 getpid(), self, [self contentView],
-+                                 _frame.size.width, _frame.size.height);
-+            unsigned remaining = 128;
-+            traceGeometryTree(_backgroundView, 0, &remaining);
-+        }
-         [_backgroundView setNeedsDisplay: YES];
-         [self resetCursorRects];
-         [self saveFrameUsingName: _autosaveFrameName];
-@@ -3260,8 +3549,7 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -3260,8 +3473,7 @@ static BOOL _allowsAutomaticWindowTabbing;
                  mouseWasInside && !mouseIsInside) {
                  [exited addObject: area];
              }
@@ -2030,7 +1786,7 @@ index d545120a..b2845478 100644
                  [moved addObject: area];
              }
              if (options & NSTrackingCursorUpdate && !mouseWasInside &&
-@@ -3459,7 +3747,7 @@ static BOOL _allowsAutomaticWindowTabbing;
+@@ -3459,7 +3671,7 @@ static BOOL _allowsAutomaticWindowTabbing;
  }
  
  - (CGSubWindow *) _createSubWindowWithFrame: (CGRect) frame {
@@ -2144,7 +1900,7 @@ diff --git a/AppKit/X11.backend/X11Display.m b/AppKit/X11.backend/X11Display.m
 index 5ae29bf4..358e606b 100644
 --- a/AppKit/X11.backend/X11Display.m
 +++ b/AppKit/X11.backend/X11Display.m
-@@ -48,15 +48,17 @@
+@@ -48,15 +48,21 @@
  #import "X11KeySymToUCS.h"
  #import <X11/XKBlib.h>
  #import <X11/Xutil.h>
@@ -2159,6 +1915,10 @@ index 5ae29bf4..358e606b 100644
  
  void NSColorSetCatalogColor(NSColorListName catalogName, NSColorName colorName, NSColor *color);
  
++@interface NSCursor (X11CursorVisibility)
+++ (void) _unhideOnMouseMove;
++@end
++
  @implementation X11Display
  
  static int errorHandler(Display *display, XErrorEvent *errorEvent) {
@@ -2625,7 +2385,7 @@ index 5ae29bf4..358e606b 100644
          default:
              type = NSOtherMouseUp;
          }
-@@ -1151,11 +1430,13 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1151,11 +1430,14 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
                          clickCount: clickCount
                              deltaX: 0.0
                              deltaY: deltaY];
@@ -2637,12 +2397,12 @@ index 5ae29bf4..358e606b 100644
          break;
  
      case MotionNotify:; {
++            [NSCursor _unhideOnMouseMove];
              // NSLog(@"MotionNotify, x=%d, y=%d, xroot=%d, yroot=%d\n",
              // ev->xmotion.x, ev->xmotion.y, ev->xmotion.x_root,
              // ev->xmotion.y_root);
-@@ -1195,14 +1476,29 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
+@@ -1195,14 +1477,28 @@ static NSDictionary *modeInfoToDictionary(const XRRModeInfo *mi, int depth) {
  
-+            [self pointerMoved];
              if (ev->xmotion.state & Button1Mask) {
                  type = NSLeftMouseDragged;
 -            } else if (ev->xmotion.state & Button2Mask) {
@@ -3130,7 +2890,7 @@ index bfe3839a..2521ffd5 100644
  - (void) frameChanged;
  - (void) setLastKnownCursorPosition: (CGPoint) point;
 diff --git a/AppKit/X11.backend/X11Window.m b/AppKit/X11.backend/X11Window.m
-index f4925b66..67b084a0 100644
+index f4925b66..8553a8b4 100644
 --- a/AppKit/X11.backend/X11Window.m
 +++ b/AppKit/X11.backend/X11Window.m
 @@ -38,6 +38,34 @@
@@ -3287,7 +3047,7 @@ index f4925b66..67b084a0 100644
      [_context release];
      _context = nil;
  
-@@ -421,6 +499,388 @@ static NSData *makeWindowIcon() {
+@@ -421,6 +499,379 @@ static NSData *makeWindowIcon() {
      }
  }
  
@@ -3453,18 +3213,9 @@ index f4925b66..67b084a0 100644
 +        closedir(dir);
 +    }
 +
-+    /* Keep a software owner across popup updates while the presented size
-+     * still belongs to this window. After a real resize, retaining that owner
-+     * can strand us on its popup slot even though a matching readback frame
-+     * is ready from another publisher. Let normal candidate selection make
-+     * that handoff when the old presentation no longer matches a target. */
-+    BOOL presentationMatchesTarget = NO;
-+    for (unsigned i = 0; i < frameTargetCount; ++i)
-+        if (_remoteFrameWidth == (unsigned)frameTargets[i].width &&
-+            _remoteFrameHeight == (unsigned)frameTargets[i].height)
-+            presentationMatchesTarget = YES;
-+    if (_remoteFrameSoftwarePublisher && _remoteFrameMapping && !bestSoftware &&
-+        presentationMatchesTarget) {
++    /* Keep the software compositor owner across its other window updates.
++     * Otherwise a temporary size mismatch selects stale browser readback. */
++    if (_remoteFrameSoftwarePublisher && _remoteFrameMapping && !bestSoftware) {
 +        const char *pidText = strrchr(_remoteFrameMappingPath, '-');
 +        int publisher = pidText ? atoi(pidText + 1) : 0;
 +        if (publisher > 0 && (kill(publisher, 0) == 0 || errno != ESRCH)) {
@@ -3676,7 +3427,7 @@ index f4925b66..67b084a0 100644
  - (Window) windowHandle {
      return _window;
  }
-@@ -478,6 +938,15 @@ static NSData *makeWindowIcon() {
+@@ -478,6 +929,15 @@ static NSData *makeWindowIcon() {
                        frame.size.width, frame.size.height);
      [self invalidateContextWithNewSize: frame.size];
      _frame = frame;
@@ -3692,7 +3443,7 @@ index f4925b66..67b084a0 100644
  }
  
  - (void) setHasShadow: (BOOL) value {
-@@ -559,7 +1028,29 @@ static NSData *makeWindowIcon() {
+@@ -559,7 +1019,29 @@ static NSData *makeWindowIcon() {
      XRaiseWindow(_display, _window);
  }
  
@@ -3722,7 +3473,7 @@ index f4925b66..67b084a0 100644
      Atom wmState = XInternAtom(_display, "_NET_WM_STATE", FALSE);
      Atom hiddenState = XInternAtom(_display, "_NET_WM_STATE_HIDDEN", FALSE);
  
-@@ -615,6 +1106,12 @@ static NSData *makeWindowIcon() {
+@@ -615,6 +1097,12 @@ static NSData *makeWindowIcon() {
  }
  
  - (void) openGLFlushBuffer {
@@ -3735,7 +3486,7 @@ index f4925b66..67b084a0 100644
      CGLError error;
  
      CGLContextObj prevContext = CGLGetCurrentContext();
-@@ -666,6 +1163,7 @@ static int ignoreBadWindow(Display *display, XErrorEvent *errorEvent) {
+@@ -666,6 +1154,7 @@ static int ignoreBadWindow(Display *display, XErrorEvent *errorEvent) {
  }
  
  - (void) frameChanged {
@@ -3822,10 +3573,7 @@ index 8860a087..aec7116d 100644
  
  @class NSColor, NSDraggingManager, NSPrintInfo, NSView, NSSavePanel,
          NSOpenPanel, NSFontTypeface, CGWindow;
-@@ -29,8 +30,10 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
- @interface NSDisplay : NSObject {
-     NSMutableArray *_eventQueue;
-+    BOOL _cursorHiddenUntilMouseMoves;
+@@ -31,6 +32,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
  }
  
  + (NSDisplay *) currentDisplay;
@@ -3833,17 +3581,7 @@ index 8860a087..aec7116d 100644
  
  - (NSArray *) screens;
  
-@@ -50,7 +53,9 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
- - (void) hideCursor;
- - (void) unhideCursor;
-+- (void) setCursorHiddenUntilMouseMoves: (BOOL) flag;
-+- (void) pointerMoved;
- 
- - (id) cursorWithImage: (NSImage *) image hotSpot: (NSPoint) hotSpot;
- - (id) cursorWithName: (NSString *) name;
- - (void) setCursor: (id) cursor;
- 
-@@ -95,6 +100,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
+@@ -95,6 +97,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
  
  - (NSPoint) mouseLocation;
  - (NSUInteger) currentModifierFlags;
@@ -4769,7 +4507,7 @@ index e1112f40..3a4fa2d6 100644
  COREGRAPHICS_EXPORT CGImageRef CGWindowListCreateImageFromArray(CGRect screenBounds, CFArrayRef  windowArray, CGWindowImageOption imageOption);
  
 diff --git a/CoreText/CMakeLists.txt b/CoreText/CMakeLists.txt
-index 1ec11620..af21f5b3 100644
+index 1ec11620..08a238ca 100644
 --- a/CoreText/CMakeLists.txt
 +++ b/CoreText/CMakeLists.txt
 @@ -28,7 +28,6 @@ set(CoreText_sources
@@ -4780,12 +4518,6 @@ index 1ec11620..af21f5b3 100644
  )
  
  set_source_files_properties(${CoreText_sources} LANGUAGE C)
-@@ -58,4 +57,5 @@ add_framework(CoreText
- 		Onyx2D
- 		# native
- 		FreeType
-+		fontconfig
- )
 diff --git a/CoreText/CTFont.m b/CoreText/CTFont.m
 index 94ddabf9..fa018d3d 100644
 --- a/CoreText/CTFont.m
@@ -5424,19 +5156,10 @@ index 94ddabf9..fa018d3d 100644
  
  CFTypeID CTFontGetTypeID(void)
 diff --git a/CoreText/CTFontDescriptor.m b/CoreText/CTFontDescriptor.m
-index 8866ce59..62dcf226 100644
+index 8866ce59..eb8a101c 100644
 --- a/CoreText/CTFontDescriptor.m
 +++ b/CoreText/CTFontDescriptor.m
-@@ -1,6 +1,7 @@
- #import <CoreText/CTFontDescriptor.h>
- 
--#include <stdio.h>
-+#import <Foundation/Foundation.h>
-+#import <Onyx2D/O2Font_freetype.h>
- 
- const CFStringRef kCTFontURLAttribute = CFSTR("NSCTFontFileURLAttribute");
- const CFStringRef kCTFontNameAttribute = CFSTR("NSFontNameAttribute");
-@@ -24,9 +25,103 @@ const CFStringRef kCTFontEnabledAttribute = CFSTR("NSCTFontEnabledAttribute");
+@@ -24,9 +24,23 @@ const CFStringRef kCTFontEnabledAttribute = CFSTR("NSCTFontEnabledAttribute");
  const CFStringRef kCTFontFormatAttribute = CFSTR("NSCTFontFormatAttribute");
  const CFStringRef kCTFontRegistrationScopeAttribute = CFSTR("NSCTFontRegistrationScopeAttribute");
  const CFStringRef kCTFontPriorityAttribute = CFSTR("NSCTFontPriorityAttribute");
@@ -5461,99 +5184,17 @@ index 8866ce59..62dcf226 100644
 +    if (value)
 +        CFRetain(value);
 +    return value;
-+}
-+
-+/* Enumerate actual installed faces, rather than returning the query itself.
-+ * FcFontList does not substitute an unrelated font for a missing family. */
-+CFArrayRef CTFontDescriptorCreateMatchingFontDescriptors(CTFontDescriptorRef descriptor,
-+                                                        CFSetRef mandatoryAttributes)
-+{
-+    if (!descriptor)
-+        return NULL;
-+    NSDictionary *query = (NSDictionary *)descriptor;
-+    FcPattern *pattern = FcPatternCreate();
-+    const CFStringRef keys[] = { kCTFontFamilyNameAttribute, kCTFontNameAttribute,
-+                                kCTFontStyleNameAttribute, kCTFontDisplayNameAttribute };
-+    const char *properties[] = { FC_FAMILY, FC_POSTSCRIPT_NAME, FC_STYLE, FC_FULLNAME };
-+    for (unsigned i = 0; i < sizeof(keys) / sizeof(keys[0]); ++i) {
-+        id value = [query objectForKey:(id)keys[i]];
-+        if ([value isKindOfClass:[NSString class]])
-+            FcPatternAddString(pattern, properties[i], (const FcChar8 *)[value UTF8String]);
-+    }
-+    FcObjectSet *objects = FcObjectSetBuild(FC_FAMILY, FC_POSTSCRIPT_NAME,
-+                                           FC_STYLE, FC_FULLNAME, FC_FILE, NULL);
-+    FcFontSet *fonts = FcFontList(O2FontSharedFontConfig(), pattern, objects);
-+    CFMutableArrayRef matchesArray = CFArrayCreateMutable(NULL, 0, &kCFTypeArrayCallBacks);
-+    for (int i = 0; fonts && i < fonts->nfont; ++i) {
-+        NSMutableDictionary *attributes = [NSMutableDictionary dictionary];
-+        for (unsigned j = 0; j < sizeof(keys) / sizeof(keys[0]); ++j) {
-+            FcChar8 *text;
-+            if (FcPatternGetString(fonts->fonts[i], properties[j], 0, &text) == FcResultMatch) {
-+                NSString *value = [NSString stringWithUTF8String:(const char *)text];
-+                if (value) [attributes setObject:value forKey:(id)keys[j]];
-+            }
-+        }
-+        FcChar8 *file;
-+        if (FcPatternGetString(fonts->fonts[i], FC_FILE, 0, &file) == FcResultMatch) {
-+            NSURL *url = [NSURL fileURLWithPath:[NSString stringWithUTF8String:(const char *)file]];
-+            if (url) [attributes setObject:url forKey:(id)kCTFontURLAttribute];
-+        }
-+        /* Point size is a request, not an installed-face property. */
-+        id size = [query objectForKey:(id)kCTFontSizeAttribute];
-+        if (size) [attributes setObject:size forKey:(id)kCTFontSizeAttribute];
-+        BOOL matches = YES;
-+        for (id key in (NSSet *)mandatoryAttributes) {
-+            id expected = [query objectForKey:key];
-+            if (!expected || ![expected isEqual:[attributes objectForKey:key]]) {
-+                matches = NO;
-+                break;
-+            }
-+        }
-+        if (matches) {
-+            CTFontDescriptorRef match = CTFontDescriptorCreateWithAttributes((CFDictionaryRef)attributes);
-+            CFArrayAppendValue(matchesArray, match);
-+            CFRelease(match);
-+        }
-+    }
-+    if (fonts) FcFontSetDestroy(fonts);
-+    FcObjectSetDestroy(objects);
-+    FcPatternDestroy(pattern);
-+    return matchesArray;
-+}
-+
-+CTFontDescriptorRef CTFontDescriptorCreateMatchingFontDescriptor(CTFontDescriptorRef descriptor,
-+                                                                CFSetRef mandatoryAttributes)
-+{
-+    CFArrayRef matches = CTFontDescriptorCreateMatchingFontDescriptors(descriptor, mandatoryAttributes);
-+    CTFontDescriptorRef result = NULL;
-+    if (matches) {
-+        if (CFArrayGetCount(matches))
-+            result = (CTFontDescriptorRef)CFRetain(CFArrayGetValueAtIndex(matches, 0));
-+        CFRelease(matches);
-+    }
-+    return result;
-+}
-+
-+CFTypeRef CTFontDescriptorCopyLocalizedAttribute(CTFontDescriptorRef descriptor,
-+                                                CFStringRef attribute, CFStringRef *language)
-+{
-+    /* Fall back to the canonical name when localized font metadata is absent.
-+     * A NULL language output is valid (Chromium uses it for family names). */
-+    if (language) *language = NULL;
-+    return CTFontDescriptorCopyAttribute(descriptor, attribute);
  }
 diff --git a/CoreText/CTFontManager.m b/CoreText/CTFontManager.m
-index 943e1b78..049665fb 100644
+index 943e1b78..5c295cbf 100644
 --- a/CoreText/CTFontManager.m
 +++ b/CoreText/CTFontManager.m
-@@ -1,23 +1,43 @@
+@@ -1,17 +1,24 @@
  #import <CoreText/CTFontManager.h>
 +#import <CoreText/CTFontDescriptor.h>
 +#import <Foundation/NSString.h>
 +#import <Foundation/NSDictionary.h>
 +#import <Foundation/NSData.h>
-+#import <Foundation/NSSet.h>
-+#import <Foundation/NSArray.h>
  
  const CFStringRef kCTFontManagerRegisteredFontsChangedNotification = CFSTR("CTFontManagerFontChangedNotification");
  
@@ -5577,26 +5218,7 @@ index 943e1b78..049665fb 100644
  }
  
  CFArrayRef CTFontManagerCopyAvailableFontFamilyNames(void)
- {
--    printf("STUB %s\n", __PRETTY_FUNCTION__);
--    return nil;
-+    CFDictionaryRef empty = CFDictionaryCreate(NULL, NULL, NULL, 0,
-+        &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
-+    CTFontDescriptorRef query = CTFontDescriptorCreateWithAttributes(empty);
-+    CFArrayRef descriptors = CTFontDescriptorCreateMatchingFontDescriptors(query, NULL);
-+    NSMutableSet *families = [NSMutableSet set];
-+    for (NSDictionary *descriptor in (NSArray *)descriptors) {
-+        id family = [descriptor objectForKey:(id)kCTFontFamilyNameAttribute];
-+        if (family) [families addObject:family];
-+    }
-+    CFRelease(query);
-+    CFRelease(empty);
-+    if (descriptors) CFRelease(descriptors);
-+    return (CFArrayRef)[[[families allObjects] sortedArrayUsingSelector:@selector(compare:)] copy];
- }
- 
- bool CTFontManagerRegisterFontsForURL(CFURLRef fontURL, CTFontManagerScope scope, CFErrorRef * error)
-@@ -25,3 +45,118 @@ bool CTFontManagerRegisterFontsForURL(CFURLRef fontURL, CTFontManagerScope scope
+@@ -25,3 +32,118 @@ bool CTFontManagerRegisterFontsForURL(CFURLRef fontURL, CTFontManagerScope scope
      printf("STUB %s\n", __PRETTY_FUNCTION__);
      return false;
  }
@@ -5873,15 +5495,9 @@ index 33dc18c6..78887dd8 100644
  
  @end
 diff --git a/CoreText/include/CoreText/CTFontDescriptor.h b/CoreText/include/CoreText/CTFontDescriptor.h
-index b2688960..fee68509 100644
+index b2688960..61dfef1a 100644
 --- a/CoreText/include/CoreText/CTFontDescriptor.h
 +++ b/CoreText/include/CoreText/CTFontDescriptor.h
-@@ -1,4 +1,4 @@
--#import <CoreFoundation/CFString.h>
-+#import <CoreFoundation/CoreFoundation.h>
- #import <CoreText/CoreTextExport.h>
- #import <CoreText/CTFontTraits.h>
- 
 @@ -24,6 +24,19 @@ CORETEXT_EXPORT const CFStringRef kCTFontEnabledAttribute;
  CORETEXT_EXPORT const CFStringRef kCTFontFormatAttribute;
  CORETEXT_EXPORT const CFStringRef kCTFontRegistrationScopeAttribute;
@@ -5902,15 +5518,11 @@ index b2688960..fee68509 100644
  
  CF_IMPLICIT_BRIDGING_ENABLED
  
-@@ -39,5 +52,10 @@ typedef enum CTFontOrientation : uint32_t {
+@@ -39,5 +52,6 @@ typedef enum CTFontOrientation : uint32_t {
  } CTFontOrientation;
  
  CORETEXT_EXPORT CFTypeRef CTFontDescriptorCopyAttribute(CTFontDescriptorRef descriptor, CFStringRef attribute);
 +CORETEXT_EXPORT CTFontDescriptorRef CTFontDescriptorCreateWithAttributes(CFDictionaryRef attributes);
-+
-+CORETEXT_EXPORT CFArrayRef CTFontDescriptorCreateMatchingFontDescriptors(CTFontDescriptorRef descriptor, CFSetRef mandatoryAttributes);
-+CORETEXT_EXPORT CTFontDescriptorRef CTFontDescriptorCreateMatchingFontDescriptor(CTFontDescriptorRef descriptor, CFSetRef mandatoryAttributes);
-+CORETEXT_EXPORT CFTypeRef CTFontDescriptorCopyLocalizedAttribute(CTFontDescriptorRef descriptor, CFStringRef attribute, CFStringRef *language);
  
  CF_IMPLICIT_BRIDGING_DISABLED
 diff --git a/CoreText/include/CoreText/KTFont.h b/CoreText/include/CoreText/KTFont.h
@@ -6265,10 +5877,10 @@ index 039d8c94..b518c961 100644
  #import <fontconfig/fontconfig.h>
  
 diff --git a/QuartzCore/CALayer.m b/QuartzCore/CALayer.m
-index 5dcac115..5de4f03f 100644
+index 5dcac115..7cc63b0b 100644
 --- a/QuartzCore/CALayer.m
 +++ b/QuartzCore/CALayer.m
-@@ -1,8 +1,243 @@
+@@ -1,8 +1,234 @@
  #import <Foundation/NSDictionary.h>
 +#import <Foundation/NSInvocation.h>
 +#import <Foundation/NSMethodSignature.h>
@@ -6340,15 +5952,6 @@ index 5dcac115..5de4f03f 100644
 +    }
 +    size_t width = IOSurfaceGetWidth(surface);
 +    size_t height = IOSurfaceGetHeight(surface);
-+    if (getenv("DARLING_UI_GEOMETRY_TRACE")) {
-+        static __thread size_t previousWidth, previousHeight;
-+        if (width != previousWidth || height != previousHeight) {
-+            fprintf(stderr, "UI_GEOMETRY surface pid=%d pixels=%zux%zu route=%s\n",
-+                getpid(), width, height, readback ? "gpu-readback" : "software");
-+            previousWidth = width;
-+            previousHeight = height;
-+        }
-+    }
 +    size_t rowBytes = IOSurfaceGetBytesPerRow(surface);
 +    size_t dataSize = rowBytes * height;
 +    void *base = IOSurfaceGetBaseAddress(surface);
@@ -6512,7 +6115,7 @@ index 5dcac115..5de4f03f 100644
  
  NSString *const kCAFilterLinear = @"linear";
  NSString *const kCAFilterNearest = @"nearest";
-@@ -61,13 +296,22 @@ NSString *const kCAContentsFormatGray8Uint = @"Gray8";
+@@ -61,13 +287,22 @@ NSString *const kCAContentsFormatGray8Uint = @"Gray8";
  }
  
  - (void) setSublayers: (NSArray *) sublayers {
@@ -6536,19 +6139,7 @@ index 5dcac115..5de4f03f 100644
  }
  
  - (id<CALayerDelegate>) delegate {
-@@ -117,6 +361,11 @@ NSString *const kCAContentsFormatGray8Uint = @"Gray8";
-             [self addAnimation: action forKey: @"bounds"];
-     }
- 
-+    if (!CGRectEqualToRect(_bounds, value) && getenv("DARLING_UI_GEOMETRY_TRACE") &&
-+        (value.size.width >= 256 || value.size.height >= 256))
-+        fprintf(stderr, "UI_GEOMETRY layer pid=%d class=%s bounds=%.0fx%.0f transform=%.3fx%.3f\n",
-+            getpid(), class_getName([self class]), value.size.width, value.size.height,
-+            _transform.m11, _transform.m22);
-     _bounds = value;
- }
- 
-@@ -171,14 +420,73 @@ NSString *const kCAContentsFormatGray8Uint = @"Gray8";
+@@ -171,14 +406,73 @@ NSString *const kCAContentsFormatGray8Uint = @"Gray8";
      _opaque = value;
  }
  
@@ -6622,19 +6213,7 @@ index 5dcac115..5de4f03f 100644
  }
  
  - (CATransform3D) transform {
-@@ -186,6 +494,11 @@ NSString *const kCAContentsFormatGray8Uint = @"Gray8";
- }
- 
- - (void) setTransform: (CATransform3D) value {
-+    if (getenv("DARLING_UI_GEOMETRY_TRACE") &&
-+        (_bounds.size.width >= 256 || _bounds.size.height >= 256))
-+        fprintf(stderr, "UI_GEOMETRY transform pid=%d class=%s bounds=%.0fx%.0f scale=%.3fx%.3f\n",
-+            getpid(), class_getName([self class]), _bounds.size.width, _bounds.size.height,
-+            value.m11, value.m22);
-     _transform = value;
- }
- 
-@@ -236,6 +549,10 @@ NSString *const kCAContentsFormatGray8Uint = @"Gray8";
+@@ -236,6 +530,10 @@ NSString *const kCAContentsFormatGray8Uint = @"Gray8";
  }
  
  - (void) dealloc {
@@ -6645,7 +6224,7 @@ index 5dcac115..5de4f03f 100644
      [_sublayers release];
      [_animations release];
      [_minificationFilter release];
-@@ -258,6 +575,33 @@ NSString *const kCAContentsFormatGray8Uint = @"Gray8";
+@@ -258,6 +556,33 @@ NSString *const kCAContentsFormatGray8Uint = @"Gray8";
      [self setSublayers: [_sublayers arrayByAddingObject: layer]];
  }
  
@@ -6679,7 +6258,7 @@ index 5dcac115..5de4f03f 100644
  - (void) replaceSublayer: (CALayer *) layer with: (CALayer *) other {
      NSMutableArray *layers = [_sublayers mutableCopy];
      NSUInteger index = [_sublayers indexOfObjectIdenticalTo: layer];
-@@ -298,9 +642,14 @@ NSString *const kCAContentsFormatGray8Uint = @"Gray8";
+@@ -298,9 +623,14 @@ NSString *const kCAContentsFormatGray8Uint = @"Gray8";
  }
  
  - (void) removeFromSuperlayer {
@@ -6695,7 +6274,7 @@ index 5dcac115..5de4f03f 100644
  }
  
  - (void) setNeedsDisplay {
-@@ -319,6 +668,19 @@ NSString *const kCAContentsFormatGray8Uint = @"Gray8";
+@@ -319,6 +649,19 @@ NSString *const kCAContentsFormatGray8Uint = @"Gray8";
      [_context startTimerIfNeeded];
  }
  
@@ -6715,7 +6294,7 @@ index 5dcac115..5de4f03f 100644
  - (CAAnimation *) animationForKey: (NSString *) key {
      return [_animations objectForKey: key];
  }
-@@ -364,4 +726,119 @@ NSString *const kCAContentsFormatGray8Uint = @"Gray8";
+@@ -364,4 +707,119 @@ NSString *const kCAContentsFormatGray8Uint = @"Gray8";
      _textureId = value;
  }
  
@@ -7105,341 +6684,21 @@ index 5ad375f8..c8e83814 100644
 +- (BOOL) _treeHasAnimations;
  @end
 diff --git a/QuartzCore/CAMetalDrawable.mm b/QuartzCore/CAMetalDrawable.mm
-index d6f86b31..20e4e88b 100644
+index d6f86b31..81a4ac10 100644
 --- a/QuartzCore/CAMetalDrawable.mm
 +++ b/QuartzCore/CAMetalDrawable.mm
-@@ -31,6 +31,13 @@
- #include <OpenGL/glext.h>
- #include <indium/indium.private.hpp>
- 
-+#include <atomic>
-+#include <cstdio>
-+#include <cstring>
-+#include <mutex>
-+#include <string>
-+#include <unistd.h>
-+
- namespace DynamicVK = Indium::DynamicVK;
- 
- static void reportGLErrors(void) {
-@@ -50,8 +57,98 @@ static void reportGLErrors(void) {
- namespace Indium::DynamicVK {
- 	static DynamicFunction<PFN_vkGetSemaphoreFdKHR> vkGetSemaphoreFdKHR("vkGetSemaphoreFdKHR");
- 	static DynamicFunction<PFN_vkGetMemoryFdKHR> vkGetMemoryFdKHR("vkGetMemoryFdKHR");
-+	static DynamicFunction<PFN_vkGetPhysicalDeviceProperties2> vkGetPhysicalDeviceProperties2Local("vkGetPhysicalDeviceProperties2");
- };
- 
-+//
-+// GPU selection diagnostics
-+//
-+
-+// The drawable's memory and semaphores are exported as OPAQUE_FD and imported into
-+// this layer's OpenGL context. That only works when Vulkan and OpenGL run on the
-+// same physical device/driver, and until now nothing checked it: a mismatch would
-+// silently break. Record which GL renderer actually presents and whether its
-+// device UUID matches the Vulkan device's, once per process, in
-+// /tmp/metal-device.log (alongside the device list Indium logs at startup).
-+// Clears pending GL errors (bounded: without a current context glGetError may never
-+// report GL_NO_ERROR).
-+static void drainGLErrors() {
-+	for (int i = 0; i < 16 && glGetError() != GL_NO_ERROR; ++i) {
-+	}
-+}
-+
-+// Same line format as Indium's device log.
-+static void appendDeviceLog(const std::string& line) {
-+	if (FILE* log = fopen("/tmp/metal-device.log", "a")) {
-+		fprintf(log, "[MetalDevice] pid=%d %s\n", getpid(), line.c_str());
-+		fclose(log);
-+	}
-+}
-+
-+static std::string darlingUuidString(const GLubyte* uuid) {
-+	static const char* digits = "0123456789abcdef";
-+	std::string out;
-+	out.reserve(32);
-+	for (int i = 0; i < GL_UUID_SIZE_EXT; ++i) {
-+		out += digits[(uuid[i] >> 4) & 0xf];
-+		out += digits[uuid[i] & 0xf];
-+	}
-+	return out;
-+}
-+
-+static void reportGpuDeviceMatch(std::shared_ptr<Indium::PrivateDevice> device) {
-+	if (!device) {
-+		return;
-+	}
-+	static std::once_flag once;
-+	std::call_once(once, [device]() {
-+		const GLubyte* renderer = glGetString(GL_RENDERER);
-+		const GLubyte* vendor = glGetString(GL_VENDOR);
-+
-+		GLubyte glDeviceUUID[GL_UUID_SIZE_EXT] = {0};
-+		GLubyte glDriverUUID[GL_UUID_SIZE_EXT] = {0};
-+		GLint uuidCount = 0;
-+		glGetIntegerv(GL_NUM_DEVICE_UUIDS_EXT, &uuidCount);
-+		if (uuidCount > 0) {
-+			glGetUnsignedBytei_vEXT(GL_DEVICE_UUID_EXT, 0, glDeviceUUID);
-+			glGetUnsignedBytevEXT(GL_DRIVER_UUID_EXT, glDriverUUID);
-+		}
-+
-+		// Queried here rather than through a new libindium export, so this QuartzCore
-+		// still loads against a libindium built before the device log.
-+		VkPhysicalDeviceIDProperties idProperties {};
-+		idProperties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES;
-+		VkPhysicalDeviceProperties2 properties2 {};
-+		properties2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
-+		properties2.pNext = &idProperties;
-+		bool haveVkUUID = false;
-+		if (DynamicVK::vkGetPhysicalDeviceProperties2Local) {
-+			DynamicVK::vkGetPhysicalDeviceProperties2Local(device->physicalDevice(), &properties2);
-+			haveVkUUID = true;
-+		}
-+		const uint8_t* vkDeviceUUID = idProperties.deviceUUID;
-+		const uint8_t* vkDriverUUID = idProperties.driverUUID;
-+
-+		std::string line = "presenting GL renderer=\"" + std::string(renderer ? reinterpret_cast<const char*>(renderer) : "(null)") + "\""
-+			+ " vendor=\"" + std::string(vendor ? reinterpret_cast<const char*>(vendor) : "(null)") + "\""
-+			+ " glDeviceUUID=" + (uuidCount > 0 ? darlingUuidString(glDeviceUUID) : std::string("none"))
-+			+ " glDriverUUID=" + (uuidCount > 0 ? darlingUuidString(glDriverUUID) : std::string("none"))
-+			+ " vulkanDeviceUUID=" + (haveVkUUID ? darlingUuidString(vkDeviceUUID) : std::string("none"))
-+			+ " vulkanDriverUUID=" + (haveVkUUID ? darlingUuidString(vkDriverUUID) : std::string("none"));
-+
-+		if (uuidCount > 0 && haveVkUUID && memcmp(glDeviceUUID, vkDeviceUUID, GL_UUID_SIZE_EXT) != 0) {
-+			line += " MISMATCH: OpenGL and Vulkan are on different GPUs; the opaque-FD import cannot work."
-+				" Run the launcher under prime-run so both use the same GPU.";
-+		} else if (uuidCount > 0 && haveVkUUID) {
-+			line += " match=yes";
-+		} else {
-+			line += " match=unknown";
-+		}
-+
-+		appendDeviceLog(line);
-+	});
-+}
-+
- //
- // helper classes
- //
-@@ -129,27 +226,109 @@ public:
- // texture
- //
- 
--static size_t findSharedMemory(const VkMemoryRequirements& reqs, std::shared_ptr<Indium::PrivateDevice> device, bool framebufferOnly) {
-+static std::string memoryFlagsString(VkMemoryPropertyFlags flags) {
-+	char buffer[16];
-+	snprintf(buffer, sizeof(buffer), "0x%x(", (unsigned) flags);
-+	std::string out = buffer;
-+	if (flags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) out += "DEVICE_LOCAL|";
-+	if (flags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) out += "HOST_VISIBLE|";
-+	if (flags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) out += "HOST_COHERENT|";
-+	if (flags & VK_MEMORY_PROPERTY_HOST_CACHED_BIT) out += "HOST_CACHED|";
-+	if (flags & VK_MEMORY_PROPERTY_LAZILY_ALLOCATED_BIT) out += "LAZILY_ALLOCATED|";
-+	if (flags & VK_MEMORY_PROPERTY_PROTECTED_BIT) out += "PROTECTED|";
-+	if (flags & VK_MEMORY_PROPERTY_DEVICE_COHERENT_BIT_AMD) out += "DEVICE_COHERENT_AMD|";
-+	if (flags & VK_MEMORY_PROPERTY_DEVICE_UNCACHED_BIT_AMD) out += "DEVICE_UNCACHED_AMD|";
-+	if (out.back() == '|') out.back() = ')';
-+	else out += "none)";
-+	return out;
-+}
-+
-+// Vulkan orders memory types so a flag-less type (system RAM, which NVIDIA
-+// exposes) precedes every DEVICE_LOCAL type, and first fit put framebufferOnly
-+// drawables there. Both images are only touched by the GPU then -- the internal
-+// one is imported by the presenting OpenGL context, which runs on the same GPU
-+// (see reportGpuDeviceMatch) -- so they take the first allowed DEVICE_LOCAL type,
-+// falling back to first fit. Without framebufferOnly they still need host-visible,
-+// coherent memory and keep first fit. On RADV type 0 is DEVICE_LOCAL: unchanged.
-+//
-+// League sets framebufferOnly=NO, so its drawables lived in system RAM and crossed
-+// PCIe every frame. framebufferOnly=NO lets Metal sample or blit the texture; it
-+// does not make it CPU-mapped, and nothing here maps either image (replaceRegion
-+// aborts, getBytes is a stub), so those drawables are placed like framebufferOnly
-+// ones too. On the RX 6600 that gave about 20 FPS more in a practice-tool fight and
-+// the same FPS when idle. The guest flag file /tmp/metal-no-drawable-vram restores
-+// host-visible memory. Read once per process, when the first drawable is created.
-+static size_t findSharedMemory(const VkMemoryRequirements& reqs, std::shared_ptr<Indium::PrivateDevice> device, bool framebufferOnly, bool internal) {
-+	static const bool drawableVram = access("/tmp/metal-no-drawable-vram", F_OK) != 0;
-+	static std::once_flag logSwitch;
-+	std::call_once(logSwitch, []() {
-+		appendDeviceLog(std::string("drawable-vram=") + (drawableVram ? "on" : "off (file:/tmp/metal-no-drawable-vram)"));
-+	});
-+
-+	const bool vramDrawable = !framebufferOnly && drawableVram;
-+	const bool gpuOnly = framebufferOnly || vramDrawable;
-+	const auto& memory = device->memoryProperties();
-+	size_t firstFit = SIZE_MAX;
-+	size_t legacy = SIZE_MAX; // the choice before 2026-10-16 (host-visible drawables), for the log
- 	size_t targetIndex = SIZE_MAX;
- 
--	for (size_t i = 0; i < device->memoryProperties().memoryTypeCount; ++i) {
--		const auto& type = device->memoryProperties().memoryTypes[i];
-+	for (size_t i = 0; i < memory.memoryTypeCount; ++i) {
-+		const auto& type = memory.memoryTypes[i];
- 
--		if ((reqs.memoryTypeBits & (1 << i)) == 0) {
-+		if ((reqs.memoryTypeBits & (1u << i)) == 0) {
- 			continue;
- 		}
- 
--		if (!framebufferOnly && (type.propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) == 0) {
--			continue;
-+		const bool hostVisible = (type.propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) != 0 && (type.propertyFlags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) != 0;
-+		if (legacy == SIZE_MAX && (framebufferOnly || hostVisible)) {
-+			legacy = i;
- 		}
- 
--		if (!framebufferOnly && (type.propertyFlags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) == 0) {
-+		if (!gpuOnly && !hostVisible) {
- 			continue;
- 		}
- 
--		// okay, this is good enough
--		targetIndex = i;
--		break;
-+		if (firstFit == SIZE_MAX) {
-+			firstFit = i;
-+		}
-+
-+		// no early exit: the scan continues to find the legacy choice for the log
-+		if (targetIndex == SIZE_MAX && (!gpuOnly || (type.propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) != 0)) {
-+			targetIndex = i;
-+		}
-+	}
-+
-+	if (targetIndex == SIZE_MAX) {
-+		targetIndex = firstFit;
-+	}
-+	if (targetIndex == SIZE_MAX) {
-+		return targetIndex;
-+	}
-+
-+	// Once per (image, storage, type) in the process, in Indium's device log.
-+	static std::atomic<uint64_t> logged[3] {};
-+	const size_t storage = vramDrawable ? 2 : (framebufferOnly ? 1 : 0);
-+	const size_t bit = ((internal ? 3u : 0u) + storage) * 32 + targetIndex;
-+	const uint64_t mask = uint64_t(1) << (bit & 63);
-+	if ((logged[bit >> 6].load(std::memory_order_relaxed) & mask) == 0 && (logged[bit >> 6].fetch_or(mask) & mask) == 0) {
-+		auto describe = [&](size_t index) {
-+			if (index == SIZE_MAX) {
-+				return std::string("none");
-+			}
-+			const auto& type = memory.memoryTypes[index];
-+			return std::to_string(index) + " flags=" + memoryFlagsString(type.propertyFlags)
-+				+ " heap=" + std::to_string(type.heapIndex)
-+				+ " heapDeviceLocal=" + ((memory.memoryHeaps[type.heapIndex].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) ? "yes" : "no");
-+		};
-+		static const char* storageNames[] = { "hostVisible", "framebufferOnly", "vram" };
-+		char typeBits[16];
-+		snprintf(typeBits, sizeof(typeBits), "0x%08x", (unsigned) reqs.memoryTypeBits);
-+		appendDeviceLog(std::string("memory alloc kind=") + (internal ? "drawable-internal" : "drawable")
-+			+ " storage=" + storageNames[storage]
-+			+ " typeBits=" + typeBits
-+			+ " type=" + describe(targetIndex)
-+			+ " firstFit=" + describe(legacy)
-+			+ (targetIndex != legacy ? " changed=yes" : " changed=no"));
- 	}
- 
- 	return targetIndex;
-@@ -161,6 +340,11 @@ CAMetalDrawableTexture::CAMetalDrawableTexture(CGSize size, Indium::PixelFormat
- 	_pixelFormat(pixelFormat),
- 	_framebufferOnly(framebufferOnly)
- {
-+	// The layer's GL context is current here (recreateDrawables / _setContext set
-+	// it), so this is the first point where the presenting GL device can be
-+	// compared with the Vulkan device. Logged once per process.
-+	reportGpuDeviceMatch(privateDevice);
-+
- 	//
- 	// create the images
- 	//
-@@ -219,7 +403,7 @@ CAMetalDrawableTexture::CAMetalDrawableTexture(CGSize size, Indium::PixelFormat
- 
- 	DynamicVK::vkGetImageMemoryRequirements(_device->device(), _image, &reqs);
- 
--	size_t targetIndex = findSharedMemory(reqs, _device, _framebufferOnly);
-+	size_t targetIndex = findSharedMemory(reqs, _device, _framebufferOnly, false);
- 
- 	if (targetIndex == SIZE_MAX) {
- 		throw std::runtime_error("No suitable memory region found for image");
-@@ -242,7 +426,7 @@ CAMetalDrawableTexture::CAMetalDrawableTexture(CGSize size, Indium::PixelFormat
- 
- 	DynamicVK::vkGetImageMemoryRequirements(_device->device(), _internalImage, &reqs);
- 
--	targetIndex = findSharedMemory(reqs, _device, _framebufferOnly);
-+	targetIndex = findSharedMemory(reqs, _device, _framebufferOnly, true);
- 
- 	if (targetIndex == SIZE_MAX) {
- 		throw std::runtime_error("No suitable memory region found for internal image");
-@@ -380,16 +564,26 @@ CAMetalDrawableTexture::CAMetalDrawableTexture(CGSize size, Indium::PixelFormat
- 		abort();
- 	}
- 
--	reportGLErrors();
-+	// reportGLErrors() is compiled out, so a failed import used to be silent (a black
-+	// window). Clear errors left by earlier calls; the import is checked below.
-+	drainGLErrors();
- 
- 	// import the memory into OpenGL
- 	glCreateMemoryObjectsEXT(1, &_memoryObject);
- 	reportGLErrors();
- 
-+	// _internalMemory is a dedicated allocation (VkMemoryDedicatedAllocateInfo above),
-+	// and EXT_external_objects requires DEDICATED_MEMORY_OBJECT_EXT to be TRUE when the
-+	// memory was created as one. Mesa ignores the flag; NVIDIA enforces it. It has to be
-+	// set before the import, after which the memory object is immutable.
-+	GLint dedicated = GL_TRUE;
-+	glMemoryObjectParameterivEXT(_memoryObject, GL_DEDICATED_MEMORY_OBJECT_EXT, &dedicated);
-+	const GLenum dedicatedError = glGetError();
-+
- 	// this transfers ownership of the FD to OpenGL
- 	glImportMemoryFdEXT(_memoryObject, reqs.size, GL_HANDLE_TYPE_OPAQUE_FD_EXT, fd);
- 	fd = -1;
--	reportGLErrors();
-+	const GLenum importError = glGetError();
- 
- 	GLint prevTex = 0;
- 	glGetIntegerv(GL_TEXTURE_BINDING_2D, &prevTex);
-@@ -401,10 +595,36 @@ CAMetalDrawableTexture::CAMetalDrawableTexture(CGSize size, Indium::PixelFormat
+@@ -401,6 +401,10 @@ CAMetalDrawableTexture::CAMetalDrawableTexture(CGSize size, Indium::PixelFormat
  	glTextureParameteri(_textureID, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
  	glTextureParameteri(_textureID, GL_TEXTURE_WRAP_S, GL_REPEAT);
  	glTextureParameteri(_textureID, GL_TEXTURE_WRAP_T, GL_REPEAT);
--	reportGLErrors();
 +	// A Metal layer is opaque: macOS ignores the drawable's alpha channel. The game's blended effects lower destination
 +	// alpha as a side effect, and the layer compositor (CARenderer: blending plus an alpha test against 0, over a
 +	// cleared-to-black window) then showed those regions as black quads. Always present alpha = 1.
 +	glTextureParameteri(_textureID, GL_TEXTURE_SWIZZLE_A, GL_ONE);
-+	const GLenum setupError = glGetError();
+ 	reportGLErrors();
  
  	glTextureStorageMem2DEXT(_textureID, 1, GL_RGBA8, _size.width, _size.height, _memoryObject, 0);
--	reportGLErrors();
-+	const GLenum storageError = glGetError();
-+
-+	// The first import in the process is always logged, so a working run on a new
-+	// driver shows up too; after that only failed imports, at most five.
-+	static std::atomic<unsigned> importCount {0};
-+	static std::atomic<unsigned> importFailures {0};
-+	const bool failed = dedicatedError != GL_NO_ERROR || importError != GL_NO_ERROR || setupError != GL_NO_ERROR || storageError != GL_NO_ERROR;
-+	const bool first = importCount.fetch_add(1, std::memory_order_relaxed) == 0;
-+	if (first || (failed && importFailures.fetch_add(1, std::memory_order_relaxed) < 5)) {
-+		GLint dedicatedReadBack = -1;
-+		GLint tiling = 0;
-+		glGetMemoryObjectParameterivEXT(_memoryObject, GL_DEDICATED_MEMORY_OBJECT_EXT, &dedicatedReadBack);
-+		glGetTextureParameteriv(_textureID, GL_TEXTURE_TILING_EXT, &tiling);
-+		const GLenum queryError = glGetError();
-+		char line[512];
-+		snprintf(line, sizeof(line), "drawable GL import%s dedicated=%s size=%llu %dx%d memoryType=%zu tiling=linear glTiling=%s"
-+			" dedicated_error=0x%x import_error=0x%x setup_error=0x%x storage_error=0x%x query_error=0x%x%s",
-+			first ? " (first)" : "", dedicatedReadBack == GL_TRUE ? "yes" : (dedicatedReadBack == -1 ? "unknown" : "no"),
-+			(unsigned long long) reqs.size, (int) _size.width, (int) _size.height, targetIndex,
-+			tiling == GL_LINEAR_TILING_EXT ? "linear" : (tiling == GL_OPTIMAL_TILING_EXT ? "optimal" : "unknown"),
-+			dedicatedError, importError, setupError, storageError, queryError, failed ? " FAILED" : " ok");
-+		appendDeviceLog(line);
-+	}
- 
- 	glBindTexture(GL_TEXTURE_2D, prevTex);
- };
-@@ -605,35 +825,16 @@ void CAMetalDrawableActual::present() {
+@@ -605,35 +609,16 @@ void CAMetalDrawableActual::present() {
  			return;
  		}
  
@@ -7481,7 +6740,7 @@ index d6f86b31..20e4e88b 100644
  	}
  }
  
-@@ -702,9 +903,46 @@ void CAMetalDrawableActual::reset() {
+@@ -702,9 +687,24 @@ void CAMetalDrawableActual::reset() {
  };
  
  void CAMetalDrawableActual::synchronizeRender() {
@@ -7489,11 +6748,6 @@ index d6f86b31..20e4e88b 100644
 -	GLenum layout = GL_LAYOUT_GENERAL_EXT;
 -	glWaitSemaphoreEXT(_glSemaphore, 0, NULL, 1, &tex, &layout);
 +    if (!_semaphore) return;
-+    // GL errors of the import and wait are checked for the first imports of the
-+    // process only: glGetError can stall a threaded GL driver, and this runs every frame.
-+    static std::atomic<unsigned> checkedImports {0};
-+    bool check = false;
-+    GLenum importError = GL_NO_ERROR;
 +    if (_glSemaphore == 0) {
 +        // prepareRender() has made the layer's GL context current on this
 +        // thread. Never try to steal it from the submission worker.
@@ -7505,44 +6759,22 @@ index d6f86b31..20e4e88b 100644
 +        info.semaphore = _semaphore->semaphore;
 +        info.handleType = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT;
 +        if (DynamicVK::vkGetSemaphoreFdKHR(_semaphore->device->device(), &info, &fd) != VK_SUCCESS) abort();
-+        check = checkedImports.fetch_add(1, std::memory_order_relaxed) < 600;
-+        if (check) drainGLErrors();
 +        glImportSemaphoreFdEXT(_glSemaphore, GL_HANDLE_TYPE_OPAQUE_FD_EXT, fd);
 +        // A successful import transfers the native FD to the GL driver.
-+        if (check) importError = glGetError();
 +    }
 +    GLuint tex = _texture->glTexture();
 +    GLenum layout = GL_LAYOUT_GENERAL_EXT;
 +    glWaitSemaphoreEXT(_glSemaphore, 0, NULL, 1, &tex, &layout);
-+    if (check) {
-+        // One line on first use, then only failures (at most five).
-+        const GLenum waitError = glGetError();
-+        const bool failed = importError != GL_NO_ERROR || waitError != GL_NO_ERROR;
-+        static std::atomic<bool> loggedFirst {false};
-+        static std::atomic<unsigned> failures {0};
-+        const bool first = !loggedFirst.exchange(true, std::memory_order_relaxed);
-+        if (first || (failed && failures.fetch_add(1, std::memory_order_relaxed) < 5)) {
-+            char line[192];
-+            snprintf(line, sizeof(line), "drawable GL semaphore%s import_error=0x%x wait_error=0x%x%s (checked for the first 600 imports)",
-+                first ? " (first)" : "", importError, waitError, failed ? " FAILED" : " ok");
-+            appendDeviceLog(line);
-+        }
-+    }
  };
  
  static void glDebugCallback(GLenum source, GLenum type, GLuint id, GLenum severity, GLsizei length, const GLchar* message, const void* context) {
 diff --git a/QuartzCore/CAMetalLayer.mm b/QuartzCore/CAMetalLayer.mm
-index b81e2e14..63533444 100644
+index b81e2e14..7b9891fb 100644
 --- a/QuartzCore/CAMetalLayer.mm
 +++ b/QuartzCore/CAMetalLayer.mm
-@@ -25,7 +25,79 @@
- #import <QuartzCore/CALayerContext.h>
+@@ -26,6 +26,74 @@
  #import <Metal/stubs.h>
  
-+// Wait-site counters (flag file /tmp/metal-debug-waits, checked once at process start): the same summary the Indium
-+// hand-off waits write, so the drawable hand-out and the command-buffer hand-offs appear in one histogram.
-+#include <indium/waits.private.hpp>
-+
  #include <algorithm>
 +#include <cstdio>
 +#include <unistd.h>
@@ -7615,7 +6847,7 @@ index b81e2e14..63533444 100644
  
  #import "CALayerInternal.h"
  
-@@ -205,6 +277,65 @@ static void reportGLErrors(void) {
+@@ -205,6 +273,65 @@ static void reportGLErrors(void) {
  
  @end
  
@@ -7681,7 +6913,7 @@ index b81e2e14..63533444 100644
  @implementation CAMetalLayerInternal
  
  #if DARLING_METAL_ENABLED
-@@ -363,12 +494,15 @@ static void reportGLErrors(void) {
+@@ -363,6 +490,7 @@ static void reportGLErrors(void) {
  - (id<CAMetalDrawable>)nextDrawable
  {
  	std::shared_ptr<CAMetalDrawableActual> drawable = nullptr;
@@ -7689,15 +6921,7 @@ index b81e2e14..63533444 100644
  
  	[_drawableCondition lock];
  
- 	NSDate* endTime = [NSDate dateWithTimeIntervalSinceNow: 1];
- 
- 	while (_usableDrawablesBitmap == 0) {
-+		// No drawable is free: this thread really blocks here (the wait is what the pool starvation costs the game).
-+		Indium::Waits::Block block("nextDrawable");
- 		if (_allowsNextDrawableTimeout) {
- 			if (![_drawableCondition waitUntilDate: endTime]) {
- 				break;
-@@ -380,6 +514,8 @@ static void reportGLErrors(void) {
+@@ -380,6 +508,8 @@ static void reportGLErrors(void) {
  
  	if (_usableDrawablesBitmap == 0) {
  		// timeout reached
@@ -7706,7 +6930,7 @@ index b81e2e14..63533444 100644
  		[_drawableCondition unlock];
  		return nil;
  	}
-@@ -400,6 +536,8 @@ static void reportGLErrors(void) {
+@@ -400,6 +530,8 @@ static void reportGLErrors(void) {
  	}
  
  	_usableDrawablesBitmap &= ~(1u << drawableID);
@@ -7715,7 +6939,7 @@ index b81e2e14..63533444 100644
  
  	drawable = _drawables[drawableID];
  
-@@ -410,20 +548,36 @@ static void reportGLErrors(void) {
+@@ -410,20 +542,36 @@ static void reportGLErrors(void) {
  
  - (void)queuePresent: (NSUInteger)drawableID
  {
@@ -7753,7 +6977,7 @@ index b81e2e14..63533444 100644
  	[_drawableCondition lock];
  	_usableDrawablesBitmap |= 1u << drawableID;
  	[_drawableCondition signal];
-@@ -455,7 +609,7 @@ static void reportGLErrors(void) {
+@@ -455,7 +603,7 @@ static void reportGLErrors(void) {
  	}
  	_usableDrawablesBitmap = 0;
  
@@ -7762,7 +6986,7 @@ index b81e2e14..63533444 100644
  		// can't create new drawables
  		[_drawableCondition unlock];
  		return;
-@@ -506,6 +660,10 @@ static void reportGLErrors(void) {
+@@ -506,6 +654,10 @@ static void reportGLErrors(void) {
  			glTextureParameteri(_tex, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
  			glTextureParameteri(_tex, GL_TEXTURE_WRAP_S, GL_REPEAT);
  			glTextureParameteri(_tex, GL_TEXTURE_WRAP_T, GL_REPEAT);
@@ -7773,7 +6997,7 @@ index b81e2e14..63533444 100644
  			reportGLErrors();
  		}
  	}
-@@ -516,6 +674,10 @@ static void reportGLErrors(void) {
+@@ -516,6 +668,10 @@ static void reportGLErrors(void) {
  - (void)prepareRender
  {
  	std::shared_ptr<CAMetalDrawableActual> drawable = nullptr;
@@ -7784,7 +7008,7 @@ index b81e2e14..63533444 100644
  
  	[_drawableCondition lock];
  	if (_queuedDrawableCount > 0) {
-@@ -528,11 +690,62 @@ static void reportGLErrors(void) {
+@@ -528,11 +684,62 @@ static void reportGLErrors(void) {
  	if (drawable) {
  		// wait for the drawable to be fully rendered before copying it to the render texture
  		// (this is a GPU-side wait)
@@ -7847,7 +7071,7 @@ index b81e2e14..63533444 100644
  	}
  
  	@synchronized(self) {
-@@ -575,6 +788,11 @@ static void reportGLErrors(void) {
+@@ -575,6 +782,11 @@ static void reportGLErrors(void) {
  {
  	[super _setContext: context];
  
@@ -7859,7 +7083,7 @@ index b81e2e14..63533444 100644
  	if (_tex == 0) {
  		// create our textures now using the context's CGLContext
  		CGLContextObj prev = CGLGetCurrentContext();
-@@ -589,10 +807,15 @@ static void reportGLErrors(void) {
+@@ -589,10 +801,15 @@ static void reportGLErrors(void) {
  		glTextureParameteri(_tex, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
  		glTextureParameteri(_tex, GL_TEXTURE_WRAP_S, GL_REPEAT);
  		glTextureParameteri(_tex, GL_TEXTURE_WRAP_T, GL_REPEAT);
@@ -8458,140 +7682,3 @@ new file mode 100644
 +- (instancetype) init;
 +
 +@end
-diff --git a/AppKit/NSWorkspace.m b/AppKit/NSWorkspace.m
-index ad5e4f9d..dbd997aa 100644
---- a/AppKit/NSWorkspace.m
-+++ b/AppKit/NSWorkspace.m
-@@ -20,9 +20,58 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. */
- #import <AppKit/NSRaise.h>
- #import <AppKit/NSWorkspace.h>
- #import <Foundation/Foundation.h>
-+#include <dispatch/dispatch.h>
- 
- NSString *const NSWorkspaceApplicationKey = @"NSWorkspaceApplicationKey";
- 
-+/* Electron's shell.openExternal() uses -openURL:configuration:completionHandler: (macOS 10.15)
-+ * with a configured NSWorkspaceOpenConfiguration, so the configuration needs real properties.
-+ * The URL itself is opened by -openURL: (LaunchServices in MacWorkspace). */
-+@interface NSWorkspaceOpenConfiguration () {
-+    BOOL _activates, _hides, _hidesOthers, _addsToRecentItems, _createsNewApplicationInstance;
-+    BOOL _allowsRunningApplicationSubstitution, _forPrinting, _promptsUserIfNeeded, _requiresUniversalLinks;
-+    NSAppleEventDescriptor *_appleEvent;
-+    NSArray *_arguments;
-+    NSDictionary *_environment;
-+    cpu_type_t _architecture;
-+}
-+@end
-+
-+@implementation NSWorkspaceOpenConfiguration
-+@synthesize activates = _activates, hides = _hides, hidesOthers = _hidesOthers;
-+@synthesize addsToRecentItems = _addsToRecentItems, createsNewApplicationInstance = _createsNewApplicationInstance;
-+@synthesize allowsRunningApplicationSubstitution = _allowsRunningApplicationSubstitution;
-+@synthesize forPrinting = _forPrinting, promptsUserIfNeeded = _promptsUserIfNeeded;
-+@synthesize requiresUniversalLinks = _requiresUniversalLinks;
-+@synthesize appleEvent = _appleEvent, arguments = _arguments, environment = _environment;
-+@synthesize architecture = _architecture;
-++ (instancetype) configuration {
-+    NSWorkspaceOpenConfiguration *c = [[[self alloc] init] autorelease];
-+    c->_activates = YES;
-+    c->_addsToRecentItems = YES;
-+    c->_allowsRunningApplicationSubstitution = YES;
-+    return c;
-+}
-+- (id) copyWithZone: (NSZone *) zone {
-+    NSWorkspaceOpenConfiguration *c = [[[self class] allocWithZone: zone] init];
-+    c->_activates = _activates; c->_hides = _hides; c->_hidesOthers = _hidesOthers;
-+    c->_addsToRecentItems = _addsToRecentItems;
-+    c->_createsNewApplicationInstance = _createsNewApplicationInstance;
-+    c->_allowsRunningApplicationSubstitution = _allowsRunningApplicationSubstitution;
-+    c->_forPrinting = _forPrinting; c->_promptsUserIfNeeded = _promptsUserIfNeeded;
-+    c->_requiresUniversalLinks = _requiresUniversalLinks; c->_architecture = _architecture;
-+    c->_appleEvent = [_appleEvent retain];
-+    c->_arguments = [_arguments copy]; c->_environment = [_environment copy];
-+    return c;
-+}
-+- (void) dealloc {
-+    [_appleEvent release];
-+    [_arguments release];
-+    [_environment release];
-+    [super dealloc];
-+}
-+@end
-+
- NSString *const NSWorkspaceWillPowerOffNotification =
-         @"NSWorkspaceWillPowerOffNotification";
- 
-@@ -161,6 +210,24 @@ NSNotificationName NSWorkspaceWillUnmountNotification = @"NSWorkspaceWillUnmount
-     return 0;
- }
- 
-+- (void) openURL: (NSURL *) url
-+        configuration: (NSWorkspaceOpenConfiguration *) configuration
-+        completionHandler: (void (^)(id application, NSError *error)) completionHandler
-+{
-+    // Opening may wait on another process; keep it off the caller's thread.
-+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-+        BOOL opened = [self openURL: url];
-+        if (completionHandler != NULL) {
-+            NSError *error = nil;
-+            if (!opened)
-+                error = [NSError errorWithDomain: NSCocoaErrorDomain code: 256 userInfo: nil];
-+            dispatch_async(dispatch_get_main_queue(), ^{
-+                completionHandler(nil, error);
-+            });
-+        }
-+    });
-+}
-+
- - (BOOL) selectFile: (NSString *) path
-         inFileViewerRootedAtPath: (NSString *) rootedAtPath
- {
-@@ -317,16 +384,3 @@ NSNotificationName NSWorkspaceWillUnmountNotification = @"NSWorkspaceWillUnmount
- }
- 
- @end
--
--static dispatch_once_t _initOnceNsWorkspaceOpenConfig;
--static NSWorkspaceOpenConfiguration* _singletonNsWorkspaceOpenConfig;
--
--@implementation NSWorkspaceOpenConfiguration
--+ (instancetype)configuration {
--    dispatch_once(&_initOnceNsWorkspaceOpenConfig, ^{
--        _singletonNsWorkspaceOpenConfig = [[NSWorkspaceOpenConfiguration alloc] init];
--    });
--    return _singletonNsWorkspaceOpenConfig;
--}
--
--@end
-\ No newline at end of file
-diff --git a/AppKit/NSGeometryTrace.h b/AppKit/NSGeometryTrace.h
-new file mode 100644
-index 00000000..a51a9241
---- /dev/null
-+++ b/AppKit/NSGeometryTrace.h
-@@ -0,0 +1,25 @@
-+/* Opt-in runtime geometry diagnostics; never log view text or client data. */
-+#ifndef DARLING_NS_GEOMETRY_TRACE_H
-+#define DARLING_NS_GEOMETRY_TRACE_H
-+#include <stdarg.h>
-+#include <stdio.h>
-+#include <stdlib.h>
-+
-+static inline void DarlingGeometryTrace(const char *format, ...) {
-+    if (!getenv("DARLING_UI_GEOMETRY_TRACE"))
-+        return;
-+    va_list args, copy;
-+    va_start(args, format);
-+    va_copy(copy, args);
-+    vfprintf(stderr, format, args);
-+    va_end(args);
-+    /* Clients may redirect stderr to a non-log descriptor. Keep a copy in
-+     * the guest's temporary directory so their resize events remain visible. */
-+    FILE *file = fopen("/tmp/darling-ui-geometry.log", "a");
-+    if (file) {
-+        vfprintf(file, format, copy);
-+        fclose(file);
-+    }
-+    va_end(copy);
-+}
-+#endif

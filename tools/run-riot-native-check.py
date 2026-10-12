@@ -9,8 +9,6 @@ import tempfile
 
 root = Path(__file__).resolve().parent.parent
 checks = {
-    "riot-launchservices-null-error-check": "LAUNCHSERVICES_NULL_ERROR",
-    "m327-cgl-resolver-check": "GL_RESOLVER",
     "riot-mach-exception-state-check": "MACH_EXCEPTION_STATE",
     "riot-running-application-check": "RUNNING_APP",
     "riot-task-info-check": "TASK_INFO",
@@ -36,7 +34,7 @@ parser.add_argument("--timeout", type=int, default=30)
 args = parser.parse_args()
 if not 1 <= args.timeout <= 120:
     parser.error("timeout must be between 1 and 120 seconds")
-binary = (root / "build" / args.check).resolve()
+binary = root / "build" / args.check
 if not binary.is_file():
     parser.error("probe has not been built")
 
