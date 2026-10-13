@@ -43,8 +43,6 @@ Build/install the kernel library using [the incremental update steps](SETUP.md#u
 
 Use `sh scripts/installer.sh euw` (or your supported region). The first-time launcher must omit the installed client's `--app-root` and pass `--skip-to-install`; the normal wrapper now does this. It also selects `league_of_legends` so the product installation UI appears after login.
 
-The installer window closing on its own, followed by `subprocess exit`, is usually a successful install: Riot's installer puts the client in `/Users/Shared/Riot Games/Riot Client.app` and exits, and its LaunchServices hand-off to that client does not start it under Darling. `scripts/installer.sh` now launches the installed client itself, and the runner links it to `/Applications/Riot Client.app` when that link is missing. If the client was not installed, the wrapper prints the installer's log directory; check the end of the newest `Launcher` log there.
-
 If logs report guest `/private/tmp` permission errors, the default prefix needs its own temporary directory. The corrected full runtime installer creates it. To repair just this default-prefix directory as your ordinary user:
 
 ```sh
@@ -60,68 +58,7 @@ There is also a separate known compatibility gap: native LaunchAgent watch regis
 
 LaunchServices dereferenced a nullable error-output pointer in six paths. The patch checks the pointer itself and populates supplied outputs; the standalone regression covers missing handlers and null outputs. Electron opens LaunchServices through an absolute CoreServices subframework path, so the paired installer also replaces that binary in the stopped guest prefix. Updating only `RuntimeFrameworks/LaunchServices.framework` can leave the crash unfixed.
 
-LaunchServices now opens `http`, `https` and `mailto` links on the Linux desktop itself. It loads the host's `libsystemd.so.0` and asks `xdg-desktop-portal` (`org.freedesktop.portal.OpenURI`) on the user session bus to open the link, so your default browser starts outside Darling and survives `darling shutdown`. Without a portal, it starts `xdg-open` in a transient systemd user unit instead. It also reports a handler for these schemes, since Electron checks for one before opening a link. Other schemes, control characters and URLs over 4096 bytes are rejected. If a link still does nothing, check the client's stderr for a `LaunchServices:` line and that `busctl --user status org.freedesktop.portal.Desktop` works on the host. Both LaunchServices and AppKit must be rebuilt. The hand-off passed the host-side D-Bus regression and opened the host browser from a guest through both `open(1)` and `NSWorkspace`; a link clicked in the Riot client is not yet confirmed. The null-pointer fix does not explain every unrelated button crash.
-
-## Language dropdown closes Riot, or client resize leaves a clipped UI
-
-The [report in issue #1](https://github.com/lucannez64/darling-lol/issues/1#issuecomment-6194498757) contains an Electron renderer abort with `Symbol not found: _CTFontDescriptorCreateMatchingFontDescriptors`. CoreText now exports font-descriptor matching and localized-attribute lookup, and enumerates installed font families through fontconfig instead of returning a null stub. Localized lookup currently falls back to canonical font names. The standalone font-list check exercises Chromium's sequence, including mandatory family matching and retained results.
-
-AppKit also left backing-layer geometry at the old size until a coordinate conversion occurred. It now updates that geometry during frame/bounds changes, and invalidates parent transforms before child resize callbacks. Native parent geometry is updated before resizing child windows, whose Y positions depend on the parent's current height. Standalone regressions reproduce both stale-size defects and pass with the corrections. A follow-up test confirmed that the language dropdown is fixed, but League still displays a 1280×720 image inside a 1600×900 window. The geometry regressions alone do not establish a fix for that remaining resize failure.
-
-Rebuild and install the runtime using the [update instructions](SETUP.md#updating-an-existing-runtime), with the game and both clients closed. CoreText is now included in the GPU/runtime installer alongside AppKit; existing installations need this new override too. Until then, a locale can be selected at launch, for example `RCLOL_REGION=BR RCLOL_LOCALE=pt_BR ./scripts/run.sh`.
-
-Live inspection subsequently confirmed a 1600×900 outer League window with both its CoreAnimation child and presentation target still at 1280×720. `NSThemeFrame` selected the last non-menu/toolbar child as the content view. A standalone reproduction showed that an overlay added after the real content received the resize instead. Frame layout now identifies the window's actual content owner (including a containing wrapper), and applies ordinary autoresizing masks to other decorations. A hidden-window regression reproduces the old behavior with an overlay sibling and passes after the fix. The user retested with this build loaded; League still failed to resize. This correction therefore does not resolve the remaining client failure.
-
-The subsequent file trace showed the browser view reaching the new frame size without a renderer resize, and a later shrink left `RenderWidgetHostViewCocoa` at 1600×900 inside 1280×720 parents. Darling's `NSView setFrame:` directly updated geometry without dispatching `setFrameSize:`. [Chromium's Cocoa implementation](https://chromium.googlesource.com/chromium/src/+/114a1ef9e848ccebec516681bcf1786f85b5cbd6/content/browser/renderer_host/render_widget_host_view_mac.mm#2273) explicitly relies on this dispatch to notify the renderer. AppKit now calls the component setters for changed origins/sizes, with a private geometry updater to avoid recursion. A standalone subclass regression failed before this correction (one callback from four size changes) and passes after it (four callbacks, including parent autoresizing in both directions). The user retested with this AppKit build loaded and still saw clipping. Passive inspection then showed the native CoreAnimation child and a published frame at 1600×900, with the presentation target remaining at 1280×720.
-
-The X11 presentation selector also retained a software publisher across popup updates even after the window outgrew its old presentation target. If that publisher switched to a small popup and a different publisher supplied the resized main frame, the selector kept following the popup slot and never resized the presentation child. It now retains that owner only while the old presentation dimensions still match a native target. A two-publisher standalone pixel regression reproduces the black enlarged area on the old backend; the new backend passes 1280×720 → 1600×900 → 1024×576 → 1280×720 with and without the shared-memory transport. After installing this backend locally, the user confirmed that League window resizing works (2026-10-15).
-
-For the AppKit and X11 corrections, exit the game and both clients manually, then use the small update instead of rebuilding the entire runtime:
-
-```sh
-python3 scripts/configure.py
-python3 build/runtime/tools/build-riot-appkit-runtime.py
-python3 build/runtime/tools/build-riot-x11-runtime.py
-darling shutdown
-sh build/runtime/tools/install-riot-appkit-runtime.sh
-sh scripts/run.sh
-```
-
-The installer requires the existing per-user AppKit overlay, saves a checksum-named backup under `build/appkit-runtime-backups`, and atomically replaces each binary, including the paired X11 backend. It does not stop processes or change the system SDK. After launch, change League between 1280×720 and 1600×900 and verify both the rendered extent and click alignment.
-
-The installer previously preferred an existing `build/riot-QuartzCore` over its newly built `build/m336-QuartzCore`. It now installs the artifact it just rebuilt, and that builder recompiles all patched compositor and Metal presentation objects. This avoids silently installing an older optional probe build.
-
-If resize clipping recurs, launch with size-only runtime tracing and resize the client manually:
-
-```sh
-mkdir -p build
-env DARLING_UI_GEOMETRY_TRACE=1 sh scripts/run.sh 2>&1 \
-  | rg --line-buffered '^UI_GEOMETRY ' | tee build/ui-geometry.log
-```
-
-Change from 1280×720 to 1600×900 and leave the client open at the broken size. AppKit also writes a bounded window/view hierarchy to the guest `/tmp/darling-ui-geometry.log` (host `~/.darling/private/tmp/darling-ui-geometry.log`). Read that file as well as `build/ui-geometry.log`: League redirects stderr, so the terminal capture alone can omit all of its resize events. The traces record window/view classes, identities, dimensions and autoresizing masks, layer scale and IOSurface dimensions at size changes. Tracing is disabled on ordinary launches. It uses the runtime's own geometry setters and surface publisher, with no debugger, client API access or input automation.
-
-The practice-tool exit in the same report remains unresolved: the supplied League client log records the game starting and exiting about two seconds later, but contains no game-process crash reason. These font and resize fixes do not establish a fix for that exit. Further diagnosis needs the game's own log/crash report or stderr from the affected machine.
-
-## Client reports macOS 10.10 and VAN -101
-
-The legacy CarbonCore `Gestalt` implementation read a Darwin kernel release as though it were a macOS product version, then fell through into `gestaltSysArchitecture`, overwriting every result with `gestaltIntel` (10). The standalone probe reproduced `gestalt=10.10.10` even though `kern.osproductversion` was already `14.7`. Version selectors now read that existing product version, return before the architecture case, initialize missing patch versions to zero and implement the documented packed-BCD limits. Null outputs and unknown selectors return errors.
-
-After installing this correction and restarting locally, the client reported macOS 14.7 and the user confirmed that Play became available. Later launches failed again, including a launch without `DARLING_UI_GEOMETRY_TRACE`. The running client was verified to have the corrected CarbonCore binary loaded. Both successful and failed sessions reported macOS 14.7; successful sessions logged `MvgState: 0`, while failed sessions logged `MvgState: 5`, despite `MvgInit` and `MvgRegisterLogin` returning zero in both. These state values are observations, not a diagnosis of their undocumented meaning. The version correction is therefore insufficient to resolve VAN -101, and tracing is not required to reproduce the failure. Entering a match remains unverified. [Riot describes VAN -101](https://support.riotgames.com/en-us/riot/performance/error-van--101) as an unsupported system configuration and recommends a supported operating system or a support ticket with logs. No verified Darling compatibility fix for this failure is available in this snapshot. A temporary test rollback of commit `ac4a832` restores `proc_listpids` returning `ENOTSUP`; it was followed by both a successful launch and another VAN failure, so it has not established that commit as the cause. Tracing was enabled on the latter launch; its contribution remains unproven.
-
-Build the small update with `python3 build/runtime/tools/build-riot-carboncore-runtime.py`. After manually exiting the game and both clients:
-
-```sh
-darling shutdown
-sh build/runtime/tools/install-riot-carboncore-runtime.sh
-sh scripts/run.sh
-```
-
-The installer adds a CarbonCore framework override and the matching absolute CoreServices subframework binary in the guest prefix, with checksum-named backups in `build/carboncore-runtime-backups`. It does not modify the SDK or restart processes. Both forms are needed because framework lookup and explicit subframework loading can take different paths. Ordinary full runtime installation includes this update too.
-
-## `LOLSIGFAIL … addr=0x143` every 10 seconds
-
-`iokitd` crashed in host glibc's `pthread_mutex_lock` and launchd restarted it every 10 seconds. It called `eglGetDisplay()` with an Xlib display, so Mesa picked the platform from `EGL_PLATFORM`. Wayland sessions often set that to `wayland`, and the first `darling` command passes its environment to every guest service, including `iokitd`. `scripts/run.sh` sets `EGL_PLATFORM=x11` and was unaffected, but `darling shell` from a Wayland terminal (including the one in `scripts/install-runtime.sh`) started the loop. `iokitd` now requests the X11 platform explicitly. The fix is part of the base install (`sudo cmake --install`); until then, start Darling with `EGL_PLATFORM=x11`.
+Historical host-browser forwarding depended on an inspector hook and is disabled in normal launches. The native null-pointer fix prevents this demonstrated crash; it does not guarantee that every external link opens on the host or explain every unrelated button crash.
 
 ## Blocky video or flickering startup logo
 
@@ -135,87 +72,12 @@ A separate multi-window path stopped the active async presenter when another dif
 - **OpenDirectory 32-bit ivar errors:** keep `TARGET_i386=OFF`; the supported client is x86-64.
 - **Undefined empty Objective-C collection symbols:** retain the patched macOS 10.15 Objective-C runtime code generation.
 - **LLVM branch opcode errors:** retain the Indium LLVM 22/23 compatibility patch; do not replace its branch handling with an unconditional version-specific opcode.
-- **Scalar float errors or opcode 71 after updating:** `Unsupported LLVM value: float 0.000000e+00` (also `1.000000e+00`) and `Unhandled instruction opcode: 71` can result from compiling Iridium with LLVM 22 headers and loading LLVM 23. The LLVM C API changed enum values between those majors. The build now selects headers and the shared library together; initialization rejects a mismatched major with `Iridium LLVM version mismatch`. Close the game and both clients, then run `git pull` and `./scripts/update.sh` to rebuild and reinstall both the base runtime and per-user overrides. If the same errors persist, include the update's `Iridium LLVM headers:` line and a newly generated `metal-errors.log` with the report.
-- **Every game shader fails to compile on LLVM 23** (r3dlog full of `Failed to compile shader`, then `Material Missing Pipeline` and a crash before the loading screen; `/tmp/metal-errors.log` shows `Unsupported LLVM value: <3 x float> zeroinitializer`): LLVM 23 represents vector splats as vector-typed `ConstantFP`/`ConstantInt`, which Iridium did not translate. Indium now splats them itself. Rebuild and reinstall the Metal/Indium pair ([setup](SETUP.md#metal-and-indium-overlays)). The offline check `python3 tools/build-riot-air-check.py --native` translates shader libraries without the game.
 - **Build process killed:** lower parallelism, for example `JOBS=2 ./scripts/build.sh` or `--parallel 1` for an incremental component build.
 - **Incremental helper cannot find `flags.make` or `link.txt`:** use Unix Makefiles, not Ninja.
 - **Prebuilt Swift file contains Git LFS pointer text:** install Git LFS and fetch the original upstream assets; pointer text is not a usable library.
-- **Submodule fetch stops with no output right after `src/external/sqlite`:** the next submodule is `src/external/swift`, whose pinned `.lfsconfig` points at the retired `git-lfs.darlinghq.org`. The checkout is blocked on that host, not on sqlite. `prepare.py` redirects that submodule's LFS requests to GitHub. To finish a fetch that was interrupted before any patches were applied, run `git -C build/darling-src -c lfs.url=https://github.com/darlinghq/darling-swift.git/info/lfs submodule update --init --recursive --progress`, then re-run `./scripts/build.sh`. Do not run that submodule update once `prepare.py` has applied patches: it resets every submodule working tree to the pinned revision and discards the patches.
 
 ## Lower fight FPS than Windows
 
-The game code itself runs natively under Darling: the x86-64 slice of the universal binary executes unchanged, picks its instruction-set paths with `cpuid` on the real CPU, and sizes its worker pool from the real logical CPU count. What differs from Windows is the path around it. Every Metal call goes through Objective-C, the Metal wrapper, Indium and Vulkan instead of a native Direct3D driver, and kernel services go through the emulation and darlingserver. In an ARAM fight the game's own code now takes most of a frame; see [status](STATUS.md#game-fps-2026-10-1314) for measurements.
+Host observation found substantial Darling CPU/RPC costs and main-thread socket waits, with reported fight FPS of 70–80 and quieter moments at 100–120 on the Ryzen 5 5500 / RX 6600. GPU utilization averaged about 61%; the CPU reached 92–94°C. These observations identify areas to investigate, not the full cause of every slow frame.
 
-If FPS drops back towards the 10-13 morning numbers (75–85 on Hexgate):
-
-1. Make sure the current kernel library, Metal and Indium overlays are installed and active: exit the game and both clients, then `darling shutdown` and `sh scripts/run.sh` ([setup](SETUP.md#game-process-switches)).
-2. Check the game's line in `/tmp/rclol-game-decisions.log`: it should read `local_semaphores=1` and `core_isolation=0`. No `/tmp/rclol-no-local-*` file should exist unless you created it on purpose.
-3. A server wait above about 0.5 ms per frame means one of the local paths is off. A runqueue wait above a few percent on the main thread means the CPU is oversubscribed, for example by `/tmp/rclol-core-isolation` or background load.
-
-Compare matches on the same map: Bilgewater runs a few percent below Hexgate.
-
-On Hyprland, also check that direct scanout is off (`hyprctl getoption render:direct_scanout` prints `int: 0`). The first match with it off ran about 16 FPS faster than the previous one on the same build; see the next section.
-
-## Hybrid graphics laptops (AMD/Intel iGPU + NVIDIA)
-
-Metal renders with Vulkan, and each finished frame is handed to an OpenGL (EGL) context that presents it. The hand-off uses opaque file descriptors, which only work when Vulkan and OpenGL run on the same GPU. Indium takes the first Vulkan device the loader lists, and on a hybrid laptop both that device and the EGL context are normally the integrated GPU, so the discrete GPU stays idle. A report in [issue #3](https://github.com/lucannez64/darling-lol/issues/3) (Ryzen 9 5900HS, RTX 3060 Laptop) measured 60-70 FPS in ARAM on the integrated GPU; on the NVIDIA GPU the game showed a black screen. **Running on an NVIDIA GPU is not validated.**
-
-### Run on the discrete GPU
-
-Start the launcher with PRIME render offload so that both Vulkan and OpenGL move to the NVIDIA GPU:
-
-```sh
-prime-run sh scripts/run.sh
-```
-
-`prime-run` sets `__NV_PRIME_RENDER_OFFLOAD=1`, `__VK_LAYER_NV_optimus=NVIDIA_only` and `__GLX_VENDOR_LIBRARY_NAME=nvidia`. `darling` copies the caller's environment into the guest, and guest processes inherit it; whether the Riot client passes all of it to the game has not been checked; the log below shows the result. Darling's OpenGL uses EGL, so if the log below still shows the integrated GPU as the presenting renderer, also set `__EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/10_nvidia.json`. On two Mesa GPUs, `DRI_PRIME=1` does the same.
-
-The guest file `/tmp/metal-gpu` (a device index or part of its name, for example `nvidia`) moves only the Vulkan side. Use it for diagnosis: on its own it splits the two sides across GPUs, and frames cannot be presented.
-
-### Check which GPU rendered
-
-Each process that uses Metal appends to guest `/tmp/metal-device.log` (host `~/.darling/private/tmp/metal-device.log`): every Vulkan device the loader reported, the selected one and why, and the renderer of the presenting OpenGL context with both device UUIDs:
-
-```
-[MetalDevice] pid=… physical name="NVIDIA GeForce RTX 3060 Laptop GPU" type=discrete vendorID=0x10de … supported=yes
-[MetalDevice] pid=… selected name="NVIDIA GeForce RTX 3060 Laptop GPU" type=discrete … reason=loader-first
-[MetalDevice] pid=… created VkDevice for 1 of 1 supported device(s) (selected only)
-[MetalDevice] pid=… presenting GL renderer="…" vendor="NVIDIA Corporation" … match=yes
-```
-
-`MISMATCH` on the presenting line means Vulkan and OpenGL are on different GPUs. `match=unknown` means the OpenGL driver reports no device UUID. Include this file with performance reports.
-
-The log also lists the selected device's memory heaps and types, and one line the first time each kind of resource (`buffer`, `texture`, `drawable`, `drawable-internal`) gets a storage mode and memory type:
-
-```
-[MetalDevice] pid=… memory heap=0 size=6144MiB deviceLocal=yes
-[MetalDevice] pid=… memory type=0 flags=0x0(none) heap=1
-[MetalDevice] pid=… memory alloc kind=texture storage=private typeBits=0x… type=1 flags=0x1(DEVICE_LOCAL) heap=0 heapDeviceLocal=yes firstFit=0 flags=0x0(none) heap=1 heapDeviceLocal=no changed=yes
-```
-
-Resources only the GPU uses (`private`, `memoryless`, and drawables, including League's `framebufferOnly`-off ones unless `/tmp/metal-no-drawable-vram` exists) take the first allowed `DEVICE_LOCAL` type. Before 2026-10-16 they took the first allowed type (`firstFit`), which on NVIDIA can be system RAM; `changed=yes` marks where the two differ. `shared` and `managed` resources keep the first host-visible type. On the RX 6600 (RADV) type 0 is `DEVICE_LOCAL`, so nothing changes there.
-
-The first import of a drawable into the presenting OpenGL context, and the first semaphore import, are logged too; later ones only when they fail (at most five):
-
-```
-[MetalDevice] pid=… drawable GL import (first) dedicated=yes size=… 1920x1080 memoryType=1 tiling=linear glTiling=linear dedicated_error=0x0 import_error=0x0 setup_error=0x0 storage_error=0x0 query_error=0x0 ok
-[MetalDevice] pid=… drawable GL semaphore (first) import_error=0x0 wait_error=0x0 ok (checked for the first 600 imports)
-```
-
-A non-zero error or `FAILED` means the frames cannot reach the window. Before 2026-10-16 the import did not mark the memory as dedicated, which the extension requires; Mesa ignores it, and it is the suspected cause of the NVIDIA black screen (not yet confirmed). If the game shows a black screen on NVIDIA, report it with this file.
-
-### Host-side checks
-
-These are host settings, not game settings. Run on AC power, and use a performance power profile (`powerprofilesctl set performance`, or `asusctl profile -P Performance` on ASUS laptops). On the tested desktop the game is limited mostly by its own main thread on the CPU, not by the GPU (see [status](STATUS.md#game-fps-2026-10-1314)), so laptop CPU power limits matter as much as the GPU choice.
-
-## Cursor stops changing shape in fullscreen
-
-On Hyprland the game's cursor can keep its first shape (for example, it never switches to the attack cursor) until you leave and re-enter fullscreen. Darling sends every change to the X server; what freezes the shape on screen is Hyprland's direct scanout of the fullscreen Xwayland window. Turn it off in `hyprland.conf`:
-
-```
-render {
-    direct_scanout = 0
-}
-```
-
-`hyprctl keyword render:direct_scanout 0` applies it until Hyprland restarts.
+The server now retains unused receive buffers and avoids preparing disabled debug strings. The host socket fixture reduces warmed empty receive allocations from 32 to zero and single-packet allocations from 64 to two. Normal launches also stop forcing unlimited UI frames and inspector scheduling hooks. An FPS gain has not yet been measured after activation. Compare manually played matches with the same graphics settings and record CPU/GPU utilization, temperature and memory pressure. Do not use legacy automated practice or profiling cycles.
